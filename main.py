@@ -33,16 +33,13 @@ def step(n: int, msg: str):
 
 
 def main():
-    print()
-    print("  ███████╗ ██████╗██╗     ██╗██████╗ ███████╗███████╗")
-    print("  ██╔════╝██╔════╝██║     ██║██╔══██╗██╔════╝██╔════╝")
-    print("  █████╗  ██║     ██║     ██║██████╔╝███████╗█████╗  ")
-    print("  ██╔══╝  ██║     ██║     ██║██╔═══╝ ╚════██║██╔══╝  ")
-    print("  ███████╗╚██████╗███████╗██║██║     ███████║███████╗")
-    print("  ╚══════╝ ╚═════╝╚══════╝╚═╝╚═╝     ╚══════╝╚══════╝")
-    print("  IoT Trust Scoring & Drift Analytics Engine")
-    print("  Exploit X — GDG JSSATEB Eclipse Hackathon")
-    print()
+
+    try:
+        with open("a.txt", "r", encoding="utf-8") as f:
+            print(f.read())
+    except FileNotFoundError:
+        pass
+
 
     # ── Step 1: Load ML models ────────────────────────────────────────────────
     step(1, "Loading IsolationForest models...")
