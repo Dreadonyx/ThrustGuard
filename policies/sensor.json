@@ -1,0 +1,7 @@
+{
+  "allowed_ports": [443],
+  "allow_new_ips": false,
+  "max_dns_entropy": 2.0,
+  "max_bytes_per_window": 50000,
+  "_note": "Sensor policy — minimal bandwidth, very strict"
+}

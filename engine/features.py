@@ -99,14 +99,27 @@ _trust_engine = None
 _policy_generator = None
 
 
+class _TrustEngineShim:
+    """
+    Thin wrapper so call sites can do `trust_engine.calculate_trust(...)`
+    even though trust.py exposes calculate_trust as a plain module function.
+    """
+    def calculate_trust(self, **kwargs):
+        from engine.trust import calculate_trust
+        return calculate_trust(**kwargs)
+
+
+_engines_initialised = False
+
+
 def _get_engines():
     """Lazy-load all downstream engines once."""
     global _policy_engine, _drift_engine, _ml_engine, _trust_engine, _policy_generator
-    if _trust_engine is None:
+    global _engines_initialised
+    if not _engines_initialised:
         from engine.policy import PolicyEngine
         from engine.drift import DriftEngine
         from engine.ml import MLEngine
-        from engine.trust import TrustEngine
         from engine.policy_generator import generate_policy
 
         _policy_engine = PolicyEngine()
@@ -114,8 +127,9 @@ def _get_engines():
         _drift_engine = DriftEngine()
         _ml_engine = MLEngine()
         _ml_engine.load_models()
-        _trust_engine = TrustEngine()
+        _trust_engine = _TrustEngineShim()
         _policy_generator = generate_policy
+        _engines_initialised = True
     return _policy_engine, _drift_engine, _ml_engine, _trust_engine, _policy_generator
 
 
@@ -308,3 +322,101 @@ def get_device_states() -> dict:
             for device_id, baseline in _baselines.items()
             if baseline is not None
         }
+
+
+# Normal baseline stats per device type (mean bytes, std bytes, starting score).
+# These match train_models.py NORMAL_PROFILES exactly.
+_SEED_PROFILES = {
+    "camera": {"mean": 1_000_000, "std": 50_000,  "ewma": 1_000_000},
+    "bulb":   {"mean":    50_000, "std":  5_000,  "ewma":    50_000},
+    "sensor": {"mean":    10_000, "std":  1_000,  "ewma":    10_000},
+}
+
+_NORMAL_WINDOW_TEMPLATES = {
+    "camera": {
+        "bytes": 1_000_000, "packets": 120, "dns_entropy": 2.1,
+        "unique_dest_ips": 2, "ports_used": [443], "new_ip_flag": False,
+        "z_score": 0.8, "ewma_delta": 0.01, "spike_delta": 0.0,
+    },
+    "bulb": {
+        "bytes": 50_000, "packets": 20, "dns_entropy": 1.2,
+        "unique_dest_ips": 1, "ports_used": [443, 80], "new_ip_flag": False,
+        "z_score": 0.5, "ewma_delta": 0.005, "spike_delta": 0.0,
+    },
+    "sensor": {
+        "bytes": 10_000, "packets": 8, "dns_entropy": 0.8,
+        "unique_dest_ips": 1, "ports_used": [443], "new_ip_flag": False,
+        "z_score": 0.3, "ewma_delta": 0.003, "spike_delta": 0.0,
+    },
+}
+
+
+def seed_device_baseline(device_id: str, device_type: str, initial_score: int = 92) -> None:
+    """
+    Force a device directly into ACTIVE state with pre-computed baseline stats.
+
+    This bypasses the 10-window burn-in gate so that the attack simulator
+    can inject malicious windows that are scored immediately.
+
+    Also writes 'initial_score' to SQLite so the TUI shows a starting score
+    for the device before any attack windows land.
+
+    Args:
+        device_id:     e.g. "cam-02"
+        device_type:   e.g. "camera"
+        initial_score: starting trust score (default 92 = healthy TRUSTED)
+    """
+    import time
+
+    profile = _SEED_PROFILES.get(device_type, _SEED_PROFILES["camera"])
+    tmpl    = _NORMAL_WINDOW_TEMPLATES.get(device_type, _NORMAL_WINDOW_TEMPLATES["camera"])
+
+    with _baselines_lock:
+        baseline = DeviceBaseline(device_id)
+        baseline.state        = STATE_ACTIVE
+        baseline.mean         = float(profile["mean"])
+        baseline.std          = float(profile["std"])
+        baseline.ewma         = float(profile["ewma"])
+        baseline.prev_bytes   = float(profile["mean"])
+        baseline.window_count = BURN_IN_WINDOWS  # pretend burn-in is done
+
+        # Fill buffer with BURN_IN_WINDOWS copies of a clean template window
+        for _ in range(BURN_IN_WINDOWS):
+            baseline.buffer.append({
+                "device_id":   device_id,
+                "device_type": device_type,
+                "timestamp":   int(time.time()),
+                **tmpl,
+            })
+
+        _baselines[device_id] = baseline
+
+    logger.info(
+        f"[Features] Seeded baseline for {device_id} ({device_type}) "
+        f"→ ACTIVE (mean={profile['mean']:,} std={profile['std']:,})"
+    )
+
+    # Write the initial trust score to SQLite so TUI shows it immediately
+    try:
+        from engine.trust import _current_scores, _init_db, _get_conn, _status_for
+        import json
+
+        _init_db()
+        _current_scores[device_id] = initial_score
+        status = _status_for(initial_score)
+        conn = _get_conn()
+        try:
+            conn.execute(
+                "INSERT INTO scores (device_id, score, status, reasons, timestamp) "
+                "VALUES (?,?,?,?,?)",
+                (device_id, initial_score, status, json.dumps([]), int(time.time()))
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        logger.info(
+            f"[Features] Seeded initial score for {device_id}: "
+            f"{initial_score} ({status})"
+        )
+    except Exception as e:
+        logger.warning(f"[Features] Could not seed initial score: {e}")

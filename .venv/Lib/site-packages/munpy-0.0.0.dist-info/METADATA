@@ -1,0 +1,22 @@
+Metadata-Version: 2.1
+Name: munpy
+Version: 0.0.0
+Summary: "Mobile U-Net for Low-Compute Deep Supervision Semantic Segmentation"
+Home-page: https://github.com/M1TE5H/munpy
+Author: M1TE5H
+Author-email: M1TE5H@hotmail.com
+License: UNKNOWN
+Project-URL: Bug Tracker, https://www.github.com/M1TE5H/munpy/issues
+Platform: UNKNOWN
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+
+# munpy
+
+Mobile U-Net Python (munpy) for Computer Vision Semantic Segmentation using Deep Learning Neural Network Architectures with the PyTorch Ecosystem on Low-Compute Environments
+
+

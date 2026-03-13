@@ -80,8 +80,9 @@ def main():
     def warmup_ollama():
         try:
             import httpx
+            ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
             resp = httpx.post(
-                "http://localhost:11434/api/generate",
+                f"{ollama_host}/api/generate",
                 json={"model": "qwen2.5-coder:7b", "prompt": "ping", "stream": False},
                 timeout=45,
             )

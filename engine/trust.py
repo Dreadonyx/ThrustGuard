@@ -110,10 +110,10 @@ def _get_current_score(device_id: str) -> int:
 def calculate_trust(
     device_id: str,
     device_type: str,
+    policy_violations: list[dict],
     drift_signals: list[dict],
     ml_result: Optional[dict],
     timestamp: int,
-    policy_violations: Optional[list[dict]] = None,   # kept for interface compat, unused
 ) -> dict:
     """
     Main entry point called by features.py for every scored window.
@@ -121,10 +121,10 @@ def calculate_trust(
     Args:
         device_id:         e.g. "cam-02"
         device_type:       e.g. "camera"
+        policy_violations: list from policy.py (may be empty)
         drift_signals:     list from drift.py (may be empty)
         ml_result:         dict from ml.py or None
         timestamp:         unix timestamp of the window
-        policy_violations: ignored (policy layer removed)
 
     Returns:
         trust_result dict matching the shared data contract:
@@ -137,7 +137,8 @@ def calculate_trust(
         }
     """
     score_before = _get_current_score(device_id)
-    all_deductions = list(drift_signals or [])
+    # Collect all deductions: policy violations + drift signals + ML result
+    all_deductions = list(policy_violations or []) + list(drift_signals or [])
     if ml_result:
         all_deductions.append(ml_result)
 

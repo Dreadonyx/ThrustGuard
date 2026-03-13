@@ -132,6 +132,20 @@ def list_available_policies() -> list[str]:
 
 class PolicyEngine:
 
+    def load_policies(self) -> None:
+        """
+        Pre-warm the policy cache for all known device types.
+        Called once at startup by features._get_engines().
+        Missing policy files are handled gracefully by _load_policy().
+        """
+        for device_type in ["camera", "bulb", "sensor"]:
+            policy = _get_policy(device_type)
+            logger.info(
+                f"[Policy] Loaded policy for '{device_type}': "
+                f"ports={policy['allowed_ports']} "
+                f"max_entropy={policy['max_dns_entropy']}"
+            )
+
     def check_policy(self, window: dict) -> list[dict]:
         """
         Check a device_window against its policy.

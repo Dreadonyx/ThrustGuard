@@ -1,33 +1,59 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
-.pytest_cache/
-.mypy_cache/
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
 
-# DB — never commit live data
+# ── Virtual environment ────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Eclipse / ThrustGuard runtime files ───────────────────────────────────────
+eclipse.db          # SQLite database (generated at runtime)
+eclipse.db-wal      # WAL journal
+eclipse.db-shm      # Shared memory file
 *.db
-*.db-shm
 *.db-wal
+*.db-shm
 
-# Models — large binaries, regenerate with train_models.py
-models/*.pkl
+# ── Auto-generated policy files for specific device instances ─────────────────
+# Keep the base type policies (camera.json, bulb.json, sensor.json)
+# but ignore auto-generated per-device-id policies (cam-01.json, etc.)
+policies/cam-*.json
+policies/bulb-*.json
+policies/sensor-*.json
 
-# Env
-.env
-*.env
+# ── Test / debug scripts ───────────────────────────────────────────────────────
+test_attack.py
 
-# OS
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── OS junk ───────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Editor
+# ── IDE ───────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
-# Misc
-a.txt
-files.zip
+# ── Environment variables ─────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
 *.zip
+files.zip

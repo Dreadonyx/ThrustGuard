@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  thrustguard:
+    build: .
+    container_name: thrustguard
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./eclipse.db:/app/eclipse.db
+      - ./models:/app/models
+    environment:
+      - ECLIPSE_API_HOST=0.0.0.0
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - ECLIPSE_FAST_MODE=1
+    stdin_open: true # For interactive TUI
+    tty: true        # For interactive TUI
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  default:
+    name: thrustguard-network

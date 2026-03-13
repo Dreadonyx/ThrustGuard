@@ -47,21 +47,21 @@ def _score_color(score: float) -> str:
     if score >= 40: return "orange3"
     return "red"
 
-def _braille_sparkline(mac_addr: str, width: int = 14) -> Text:
+def _braille_sparkline(device_id: str, width: int = 14) -> Text:
     """Renders high-res behavioral history using braille dots."""
-    history = get_score_history(mac_addr)
+    history = get_score_history(device_id)
     if not history:
         return Text(" ".join(["."] * width), style="dim")
-    
-    # Get last N scores from history list of tuples (timestamp, score)
-    recent = [h[1] for h in history[-width:]]
-    
+
+    # get_score_history returns list[dict] with key "score"
+    recent = [h["score"] for h in history[-width:]]
+
     chars = []
     for val in recent:
         # Map 0-100 to index 0-6
         level = min(6, int(val / 100 * 6))
         chars.append(BRAILLE_SPARK[level])
-    
+
     # Left-pad with empty Braille cells for clean look
     padding = ["⠀"] * (width - len(chars))
     return Text("".join(padding + chars), style="cyan")
@@ -71,6 +71,16 @@ def _terminal_bar(score: float, width: int = 15) -> Text:
     filled_len = int((score / 100) * width)
     bar = "█" * filled_len + "░" * (width - filled_len)
     return Text(bar, style=_score_color(score))
+
+def _infer_device_type(device_id: str) -> str:
+    """Infer device type from naming convention (cam-* bulb-* sensor-*)."""
+    if device_id.startswith("cam"):
+        return "camera"
+    if device_id.startswith("bulb"):
+        return "bulb"
+    if device_id.startswith("sensor"):
+        return "sensor"
+    return "unknown"
 
 # ── Main Layout Components ───────────────────────────────────────────────────
 
@@ -84,9 +94,9 @@ def render_header(devices: list[dict]) -> Text:
         else: counts["TRUSTED"] += 1
 
     spinner = BRAILLE_SNAKE[int(time.time() * 10) % len(BRAILLE_SNAKE)]
-    
+
     header = Text()
-    header.append(f" {spinner} THRUSHGUARD LOCAL_ENGINE ", style="bold cyan")
+    header.append(f" {spinner} ECLIPSE LOCAL_ENGINE ", style="bold cyan")
     header.append("│ ", style="dim")
     header.append(f" TRUSTED: {counts['TRUSTED']} ", style="green")
     header.append(f" MONITOR: {counts['MONITOR']} ", style="yellow")
@@ -108,8 +118,11 @@ def render_table(devices: list[dict]) -> Table:
     for d in devices:
         status = d.get("status", "TRUSTED")
         s_info = STATUS_DATA.get(status, STATUS_DATA["TRUSTED"])
-        t_icon = DEVICE_TYPE_ICONS.get(d.get("device_type"), "[DEV]")
-        
+        # Infer device type from device_id naming convention since
+        # get_latest_scores() does not return device_type column
+        device_type = d.get("device_type") or _infer_device_type(d.get("device_id", ""))
+        t_icon = DEVICE_TYPE_ICONS.get(device_type, "[DEV]")
+
         # Simulated blink for High Risk
         blink_style = "blink" if status == "HIGH RISK" and (int(time.time() * 2) % 2) else ""
         row_style = "on dark_red" if status == "HIGH RISK" else ""

@@ -164,18 +164,46 @@ def build_window(device_id: str, attack_window: dict, window_num: int) -> dict:
     }
 
 
+_seeded_devices: set = set()   # track devices seeded this process run
+
+
 def inject_window(window: dict) -> None:
     """
     Push window into the live engine pipeline.
     Imports features.enrich_window directly — no HTTP, no port.
+
+    On the FIRST call for a device:
+      - Calls seed_device_baseline() to put the device in ACTIVE state
+        with a realistic pre-computed baseline, bypassing the 10-window
+        burn-in. Without this, all attack windows would be silently consumed
+        by calibration and nothing would appear in the TUI.
     """
-    # Dynamic import so the script works even if run standalone
     try:
         import sys, os
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from engine.features import enrich_window
-        enrich_window(window)
-        logger.info(f"  ✅ Injected window for {window['device_id']}")
+        # Insert project root (parent of data/) so 'engine.*' imports resolve
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+
+        from engine.features import enrich_window, seed_device_baseline
+
+        device_id   = window["device_id"]
+        device_type = window.get("device_type", "camera")
+
+        # Seed baseline on first window so scoring is active immediately
+        if device_id not in _seeded_devices:
+            logger.info(f"  🔧 Seeding baseline for {device_id} ({device_type}) — bypassing burn-in")
+            seed_device_baseline(device_id, device_type, initial_score=92)
+            _seeded_devices.add(device_id)
+
+        result = enrich_window(window)
+        if result:
+            logger.info(
+                f"  ✅ Injected → {device_id}  score={result['score']} "
+                f"status={result['status']}  reasons={len(result['reasons'])}"
+            )
+        else:
+            logger.info(f"  ✅ Injected window for {device_id} (still calibrating?)")
     except ImportError as e:
         logger.warning(f"  ⚠ Could not import engine (running in standalone mode): {e}")
         logger.info(f"  Window (dry-run output):\n  {json.dumps(window, indent=2)}")
