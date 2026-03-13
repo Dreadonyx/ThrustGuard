@@ -1,7 +1,5 @@
 {
   "allowed_ports": [443, 80],
-  "allow_new_ips": false,
-  "max_dns_entropy": 3.5,
-  "max_bytes_per_window": 5000000,
-  "_note": "Default fallback policy — applies when no device-specific policy exists"
+  "max_dns_entropy": 4.0,
+  "allow_new_ips": true
 }

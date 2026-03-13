@@ -25,12 +25,17 @@ import json
 import logging
 import sqlite3
 import os
+from datetime import datetime
 import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.environ.get("ECLIPSE_DB_PATH", "eclipse.db")
+# ── DB Configuration ─────────────────────────────────────────────────────────
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_THIS_DIR, ".."))
+
+DB_PATH = os.environ.get("ECLIPSE_DB_PATH", os.path.join(_PROJECT_ROOT, "eclipse.db"))
 
 RECOVERY_PTS = 2
 
@@ -52,28 +57,36 @@ def _get_conn() -> sqlite3.Connection:
 
 def _init_db():
     conn = _get_conn()
+    
+    # Check if audit_log exists and has the new schema
+    try:
+        cursor = conn.execute("PRAGMA table_info(audit_log)")
+        cols = [row["name"] for row in cursor.fetchall()]
+        if cols and "event_body" not in cols:
+            logger.warning("[Trust] Legacy audit_log schema detected. Re-initializing...")
+            conn.execute("DROP TABLE audit_log")
+    except Exception:
+        pass
+
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS scores (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             device_id   TEXT NOT NULL,
-            score       INTEGER NOT NULL,
-            status      TEXT NOT NULL,
-            reasons     TEXT NOT NULL,
-            timestamp   INTEGER NOT NULL
+            score       REAL NOT NULL,
+            tier        TEXT NOT NULL,
+            violations  TEXT NOT NULL,
+            signals     TEXT NOT NULL,
+            timestamp   TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS audit_log (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp    TEXT NOT NULL,
             event_type   TEXT NOT NULL,
             device_id    TEXT NOT NULL,
-            details      TEXT NOT NULL,
-            score_before INTEGER,
-            score_after  INTEGER,
-            prev_hash    TEXT NOT NULL,
+            event_body   TEXT NOT NULL,
             hash         TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_scores_device ON scores(device_id, timestamp);
-        CREATE INDEX IF NOT EXISTS idx_audit_device  ON audit_log(device_id, timestamp);
     """)
     conn.commit()
     conn.close()
@@ -159,9 +172,15 @@ def calculate_trust(
     # ── Write to SQLite ───────────────────────────────────────────────────────
     conn = _get_conn()
     try:
+        ts_str = datetime.now().isoformat()
+        signals = {
+            "policy_count": len(policy_violations),
+            "drift_count": len(drift_signals),
+            "ml_anomaly": bool(ml_result)
+        }
         conn.execute(
-            "INSERT INTO scores (device_id, score, status, reasons, timestamp) VALUES (?,?,?,?,?)",
-            (device_id, new_score, status, json.dumps(reasons), timestamp)
+            "INSERT INTO scores (device_id, score, tier, violations, signals, timestamp) VALUES (?,?,?,?,?,?)",
+            (device_id, float(new_score), status, json.dumps(reasons), json.dumps(signals), ts_str)
         )
         conn.commit()
     finally:
@@ -185,8 +204,8 @@ def calculate_trust(
     trust_result = {
         "device_id": device_id,
         "score": new_score,
-        "status": status,
-        "reasons": reasons,
+        "tier": status,
+        "violations": reasons,
         "timestamp": timestamp,
     }
 
@@ -202,7 +221,7 @@ def get_latest_scores() -> list[dict]:
     """Return latest score for every device. Called by TUI every 1s."""
     conn = _get_conn()
     rows = conn.execute("""
-        SELECT s.device_id, s.score, s.status, s.reasons, s.timestamp
+        SELECT s.device_id, s.score, s.tier, s.violations, s.timestamp
         FROM scores s
         INNER JOIN (
             SELECT device_id, MAX(timestamp) as max_ts
@@ -216,8 +235,8 @@ def get_latest_scores() -> list[dict]:
         results.append({
             "device_id": r["device_id"],
             "score":     r["score"],
-            "status":    r["status"],
-            "reasons":   json.loads(r["reasons"]),
+            "tier":      r["tier"],
+            "violations": json.loads(r["violations"]),
             "timestamp": r["timestamp"],
         })
     return results

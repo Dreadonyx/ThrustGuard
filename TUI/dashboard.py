@@ -1,165 +1,159 @@
-import sys
+"""
+TUI/dashboard.py — Real-time Trust Dashboard
+Polls JSON files only. No DB, No HTTP.
+"""
+
 import os
+import json
 import time
-
-# Allow running from project root or from TUI/ directory
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
+from pathlib import Path
+from rich.live import Live
+from rich.table import Table
 from rich.layout import Layout
 from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
-from rich.live import Live
 from rich.console import Console
 from rich import box
+from rich.text import Text
 
-# Direct Engine Imports as per CONTEXT.md
-from engine.trust import get_latest_scores, get_score_history
+LIVE_LOG_DIR = Path("logs/live")
+ALL_LATEST = LIVE_LOG_DIR / "_all_latest.json"
 
 console = Console()
 
-# ── Terminal-Style Icons & Braille ───────────────────────────────────────────
+class Dashboard:
+    def __init__(self):
+        self.selected_device = None
+        self.devices_config = self._load_devices_config()
 
-# Replacing emojis with terminal-native status indicators
-STATUS_DATA = {
-    "TRUSTED":    {"color": "bold green",  "icon": "[√]", "label": "TRUSTED"},
-    "MONITOR":    {"color": "bold yellow", "icon": "[!]", "label": "MONITOR"},
-    "SUSPICIOUS": {"color": "bold orange3","icon": "[?]", "label": "SUSPECT"},
-    "HIGH RISK":  {"color": "bold red",    "icon": "[X]", "label": "RISKY  "},
-    "CALIBRATING":{"color": "dim",         "icon": "[∞]", "label": "CALIB  "},
-}
+    def _load_devices_config(self):
+        path = Path("config/devices.json")
+        if not path.exists():
+            return {}
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except:
+            return {}
 
-DEVICE_TYPE_ICONS = {
-    "camera": "[CAM]",
-    "bulb":   "[LIT]",
-    "sensor": "[SNR]",
-}
+    def _get_data(self):
+        live_data = {}
+        if ALL_LATEST.exists():
+            try:
+                with open(ALL_LATEST) as f:
+                    live_data = json.load(f)
+            except:
+                pass
+        
+        # Merge with config devices so they show up even without traffic
+        merged = {}
+        for mac, info in self.devices_config.items():
+            dev_id = info["id"]
+            if dev_id in live_data:
+                merged[dev_id] = live_data[dev_id]
+            else:
+                # Placeholder for device with no live data yet
+                merged[dev_id] = {
+                    "device_id": dev_id,
+                    "device_type": info["type"],
+                    "trust_score": 100,
+                    "tier": "TRUSTED",
+                    "violations": [],
+                    "timestamp": "No Data",
+                    "signals": []
+                }
+        return merged
 
-# Braille dot patterns for behavioral drift
-BRAILLE_SPARK = ["⠀", "⠂", "⠒", "⠖", "⠶", "⠷", "⠿"]
-BRAILLE_SNAKE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    def _get_alerts(self, device_id):
+        path = LIVE_LOG_DIR / f"{device_id}.jsonl"
+        if not path.exists():
+            return []
+        try:
+            alerts = []
+            with open(path) as f:
+                for line in f:
+                    entry = json.loads(line)
+                    if entry["violations"] or entry["tier"] == "HIGH RISK":
+                        alerts.append(entry)
+            return alerts[-5:] # last 5
+        except:
+            return []
 
-# ── Render Helpers ──────────────────────────────────────────────────────────
+    def make_table(self, data):
+        table = Table(box=box.ROUNDED, expand=True)
+        table.add_column("DEVICE_ID", style="bold cyan")
+        table.add_column("TYPE", style="dim")
+        table.add_column("SCORE", justify="right")
+        table.add_column("TIER")
+        table.add_column("TOP VIOLATION", style="italic")
+        table.add_column("LAST UPDATED", justify="center")
 
-def _score_color(score: float) -> str:
-    if score >= 80: return "green"
-    if score >= 60: return "yellow"
-    if score >= 40: return "orange3"
-    return "red"
+        for dev_id, entry in data.items():
+            score = entry["trust_score"]
+            tier = entry["tier"]
+            
+            # Color coding
+            color = "green"
+            if tier == "HIGH RISK": color = "bold red"
+            elif tier == "SUSPICIOUS": color = "orange3"
+            elif tier == "MONITOR": color = "yellow"
+            
+            # Top violation
+            top_v = "None"
+            if entry["violations"]:
+                top_v = entry["violations"][0]["detail"]
+                
+            style = ""
+            if tier == "HIGH RISK" and (int(time.time() * 2) % 2 == 0):
+                style = "blink"
 
-def _braille_sparkline(device_id: str, width: int = 14) -> Text:
-    """Renders high-res behavioral history using braille dots."""
-    history = get_score_history(device_id)
-    if not history:
-        return Text(" ".join(["."] * width), style="dim")
+            table.add_row(
+                dev_id,
+                entry["device_type"],
+                str(score),
+                Text(tier, style=color),
+                Text(top_v, style="dim" if top_v == "None" else "bold white"),
+                entry["timestamp"].split("T")[-1][:8], # Time only
+                style=style
+            )
+            
+            if not self.selected_device:
+                self.selected_device = dev_id
 
-    # get_score_history returns list[dict] with key "score"
-    recent = [h["score"] for h in history[-width:]]
+        return table
 
-    chars = []
-    for val in recent:
-        # Map 0-100 to index 0-6
-        level = min(6, int(val / 100 * 6))
-        chars.append(BRAILLE_SPARK[level])
+    def make_alerts_panel(self):
+        if not self.selected_device:
+            return Panel("No alerts.")
+            
+        alerts = self._get_alerts(self.selected_device)
+        content = []
+        for a in alerts:
+            ts = a["timestamp"].split("T")[-1][:8]
+            v = a["violations"][0]["detail"] if a["violations"] else "State Change"
+            content.append(f"[{ts}] [bold red]ALERT[/] {v} (Score: {a['trust_score']})")
+            
+        return Panel("\n".join(content) if content else "No recent alerts.", title=f"Alerts: {self.selected_device}")
 
-    # Left-pad with empty Braille cells for clean look
-    padding = ["⠀"] * (width - len(chars))
-    return Text("".join(padding + chars), style="cyan")
-
-def _terminal_bar(score: float, width: int = 15) -> Text:
-    """Btop-style dotted progress bar."""
-    filled_len = int((score / 100) * width)
-    bar = "█" * filled_len + "░" * (width - filled_len)
-    return Text(bar, style=_score_color(score))
-
-def _infer_device_type(device_id: str) -> str:
-    """Infer device type from naming convention (cam-* bulb-* sensor-*)."""
-    if device_id.startswith("cam"):
-        return "camera"
-    if device_id.startswith("bulb"):
-        return "bulb"
-    if device_id.startswith("sensor"):
-        return "sensor"
-    return "unknown"
-
-# ── Main Layout Components ───────────────────────────────────────────────────
-
-def render_header(devices: list[dict]) -> Text:
-    """Top bar with spinner and counts."""
-    counts = {"TRUSTED": 0, "MONITOR": 0, "RISK": 0}
-    for d in devices:
-        s = d.get("status", "TRUSTED")
-        if s in ["HIGH RISK", "SUSPICIOUS"]: counts["RISK"] += 1
-        elif s == "MONITOR": counts["MONITOR"] += 1
-        else: counts["TRUSTED"] += 1
-
-    spinner = BRAILLE_SNAKE[int(time.time() * 10) % len(BRAILLE_SNAKE)]
-
-    header = Text()
-    header.append(f" {spinner} ECLIPSE LOCAL_ENGINE ", style="bold cyan")
-    header.append("│ ", style="dim")
-    header.append(f" TRUSTED: {counts['TRUSTED']} ", style="green")
-    header.append(f" MONITOR: {counts['MONITOR']} ", style="yellow")
-    header.append(f" RISK: {counts['RISK']} ", style="bold red")
-    header.append(" │ ", style="dim")
-    header.append(f" {time.strftime('%H:%M:%S')} ", style="dim")
-    return header
-
-def render_table(devices: list[dict]) -> Table:
-    """The main inventory grid."""
-    table = Table(box=box.SIMPLE_HEAVY, expand=True, border_style="bright_black")
-    table.add_column("STATUS", width=12)
-    table.add_column("DEVICE_ID", style="bold white")
-    table.add_column("TYPE", width=8)
-    table.add_column("SCORE", justify="right", width=6)
-    table.add_column("TRUST_BAR", width=18)
-    table.add_column("DRIFT_S1", width=16) # Braille Sparkline
-
-    for d in devices:
-        status = d.get("status", "TRUSTED")
-        s_info = STATUS_DATA.get(status, STATUS_DATA["TRUSTED"])
-        # Infer device type from device_id naming convention since
-        # get_latest_scores() does not return device_type column
-        device_type = d.get("device_type") or _infer_device_type(d.get("device_id", ""))
-        t_icon = DEVICE_TYPE_ICONS.get(device_type, "[DEV]")
-
-        # Simulated blink for High Risk
-        blink_style = "blink" if status == "HIGH RISK" and (int(time.time() * 2) % 2) else ""
-        row_style = "on dark_red" if status == "HIGH RISK" else ""
-
-        table.add_row(
-            Text(f"{s_info['icon']} {s_info['label']}", style=f"{s_info['color']} {blink_style}"),
-            d["device_id"],
-            Text(t_icon, style="dim cyan"),
-            Text(str(d["score"]), style=_score_color(d["score"])),
-            _terminal_bar(d["score"]),
-            _braille_sparkline(d["device_id"]),
-            style=row_style
+    def generate_layout(self):
+        data = self._get_data()
+        
+        layout = Layout()
+        layout.split_column(
+            Layout(Panel("[bold cyan]THRUSTGUARD[/] Network Trust Monitoring (JSON Mode)", border_style="cyan"), size=3),
+            Layout(self.make_table(data), name="table"),
+            Layout(self.make_alerts_panel(), size=10)
         )
-    return table
-
-# ── Dashboard Entry Point ────────────────────────────────────────────────────
+        return layout
 
 def run_dashboard():
-    """Main loop for the TUI."""
-    try:
-        with Live(refresh_per_second=4, screen=True) as live:
+    dash = Dashboard()
+    with Live(dash.generate_layout(), refresh_per_second=5, screen=True) as live:
+        try:
             while True:
-                devices = get_latest_scores() # Direct engine call
-                
-                # Assemble Layout
-                layout = Layout()
-                layout.split_column(
-                    Layout(Panel(render_header(devices), border_style="cyan"), size=3),
-                    Layout(Panel(render_table(devices), title="[bold]Behavioral Drift Analytics", border_style="bright_black")),
-                    Layout(Panel(Text("Commands: attack <id> <type> | inspect <id> | sys_exit: ^C", justify="center", style="dim"), border_style="bright_black"), size=3)
-                )
-                
-                live.update(layout)
                 time.sleep(0.2)
-    except KeyboardInterrupt:
-        console.clear()
-        console.print("[bold cyan]ThrushGuard[/] - System Disconnected.\n")
+                live.update(dash.generate_layout())
+        except KeyboardInterrupt:
+            pass
 
 if __name__ == "__main__":
     run_dashboard()

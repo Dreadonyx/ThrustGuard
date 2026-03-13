@@ -1,0 +1,25 @@
+========================================================================
+  ECLIPSE IoT TRUST ENGINE — COMPLIANCE REPORT
+  Generated : 2026-03-13 13:40:55 UTC
+========================================================================
+
+  Audit Chain : VERIFIED ✅
+  Total Entries : 3
+
+── SCORE_UPDATE (ISO A.8.15 / SOC-2 CC7.2)  [0 events]
+   No events recorded.
+
+── TRUST_VIOLATION (ISO A.8.22 / SOC-2 CC6.6)  [3 events]
+   [2026-03-13 13:40:13] cam-02        Traffic spike Z=100000.00 > 3.0  (92→72)
+   [2026-03-13 13:40:33] cam-02        DNS entropy 3.90 > policy max 3.5 (tunneling?)  (72→9)
+   [2026-03-13 13:40:53] cam-02        Port 22 unauthorized (allowed: [443, 80])  (9→0)
+
+── DEVICE_ISOLATED (ISO A.5.18 / SOC-2 CC6.2)  [0 events]
+   No events recorded.
+
+── ANOMALY_DETECTED (ISO A.8.16 / SOC-2 CC7.3)  [0 events]
+   No events recorded.
+
+========================================================================
+  END OF REPORT
+========================================================================
