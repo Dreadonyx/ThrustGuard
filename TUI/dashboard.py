@@ -139,7 +139,7 @@ class Dashboard:
         
         layout = Layout()
         layout.split_column(
-            Layout(Panel("[bold cyan]THRUSTGUARD[/] Network Trust Monitoring (JSON Mode)", border_style="cyan"), size=3),
+            Layout(Panel("[bold cyan]TRUSTGUARD[/] Network Trust Monitoring (JSON Mode)", border_style="cyan"), size=3),
             Layout(self.make_table(data), name="table"),
             Layout(self.make_alerts_panel(), size=10)
         )

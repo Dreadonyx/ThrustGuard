@@ -1,5 +1,5 @@
 """
-main.py — ThrustGuard Entry Point
+main.py — TrustGuard Entry Point
 Coordinates Sniffer capture and TUI dashboard.
 """
 
