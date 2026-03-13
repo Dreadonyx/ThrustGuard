@@ -1,1 +1,33 @@
-.env/
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# DB — never commit live data
+*.db
+*.db-shm
+*.db-wal
+
+# Models — large binaries, regenerate with train_models.py
+models/*.pkl
+
+# Env
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Misc
+a.txt
+files.zip
+*.zip
