@@ -149,15 +149,15 @@ class FeaturePipeline:
     def _write_output(self, data: dict):
         dev_id = data["device_id"]
         LIVE_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        
+
         # 1. Append to .jsonl
         history_path = LIVE_LOG_DIR / f"{dev_id}.jsonl"
         with open(history_path, "a") as f:
             f.write(json.dumps(data) + "\n")
-            
+
         # 2. Atomic Overwrite latest.json
         self._atomic_write(LIVE_LOG_DIR / f"{dev_id}_latest.json", data)
-        
+
         # 3. Atomic Overwrite _all_latest.json
         all_latest_path = LIVE_LOG_DIR / "_all_latest.json"
         all_latest = {}
@@ -166,12 +166,52 @@ class FeaturePipeline:
                 with open(all_latest_path) as f:
                     all_latest = json.load(f)
             except: pass
-        
+
         all_latest[dev_id] = data
         self._atomic_write(all_latest_path, all_latest)
+
+        # 4. Write to SQLite so the TUI (eclipse.db) can read it
+        #    Map FeaturePipeline's output format → trust.calculate_trust() contract.
+        try:
+            from engine.trust import calculate_trust
+            import time as _time
+
+            # violations from policy engine: [{reason, penalty}, ...]
+            # trust.py expects [{reason, deduction}, ...] — remap key
+            violations = [
+                {"reason": v.get("reason", str(v)), "deduction": abs(v.get("penalty", 0))}
+                for v in data.get("violations", [])
+            ]
+            # drift signals: same remap
+            drift_signals = [
+                {"reason": s.get("reason", str(s)), "deduction": abs(s.get("penalty", 0))}
+                for s in data.get("signals", [])
+            ]
+            # ML result remap
+            ml_raw = data.get("ml_score", 0)
+            ml_result = None
+            if ml_raw and ml_raw < -0.1:
+                severity = "severe" if ml_raw <= -0.25 else "mild"
+                ml_result = {
+                    "reason": f"ML anomaly [{severity}] IF score {ml_raw:.3f} < -0.1",
+                    "deduction": 8,
+                }
+
+            calculate_trust(
+                device_id        = dev_id,
+                device_type      = data.get("device_type", "unknown"),
+                policy_violations= violations,
+                drift_signals    = drift_signals,
+                ml_result        = ml_result,
+                timestamp        = int(_time.time()),
+            )
+        except Exception as e:
+            # Non-fatal: JSONL still captured; TUI just won't update this window
+            print(f"[features] SQLite write failed for {dev_id}: {e}", file=__import__("sys").stderr)
 
     def _atomic_write(self, path: Path, data: dict):
         tmp_path = path.with_suffix(".tmp")
         with open(tmp_path, "w") as f:
             json.dump(data, f, indent=2)
         os.replace(tmp_path, path)
+
