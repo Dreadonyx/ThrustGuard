@@ -1,37 +1,40 @@
 """
 mcp_server.py — ThrushGuard MCP Server
-Exposes ThrushGuard data as MCP tools for Claude Desktop or any MCP client.
+Reads from logs/live/_all_latest.json and per-device .jsonl files.
+No SQLite dependency. No import-time side effects.
 
 Tools:
-  get_device_scores()           — all devices, current trust scores + tiers
-  get_device_detail(device_id)  — full history + violations for one device
-  get_incident_report(device_id)— AI-generated narrative (Ollama phi3:mini)
-  verify_audit_chain()          — hash chain integrity check
+  get_device_scores()            — all devices, live trust scores
+  get_device_detail(device_id)   — full history + violations
+  get_incident_report(device_id) — AI narrative via phi3:mini
+  verify_audit_chain()           — hash chain check
 
-Run standalone (stdio transport for Claude Desktop):
-  python mcp_server.py
+Run for MCP Inspector:
+  npx @modelcontextprotocol/inspector python mcp_server.py
 
-Add to Claude Desktop config (~/.config/claude/claude_desktop_config.json):
+Claude Desktop config (~/.config/claude/claude_desktop_config.json):
   {
     "mcpServers": {
       "thrushguard": {
         "command": "python",
-        "args": ["/path/to/ThrushGuard/mcp_server.py"]
+        "args": ["/absolute/path/to/ThrushGuard/mcp_server.py"]
       }
     }
   }
-
-Or run alongside main.py — main.py calls start_mcp_background().
 """
 
 import json
 import os
 import sys
+import time
 import logging
+import pathlib
+from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-logging.basicConfig(level=logging.WARNING)  # quiet during MCP stdio
+# stdout must be clean for MCP stdio protocol — all logging to stderr
+logging.basicConfig(level=logging.ERROR)
 
 from mcp.server.fastmcp import FastMCP
 
@@ -41,289 +44,261 @@ mcp = FastMCP(
         "ThrushGuard is a local IoT behavioral trust scoring engine. "
         "It monitors IoT devices (cameras, bulbs, sensors) and scores them 0-100 "
         "based on policy violations, statistical drift, and ML anomaly detection. "
-        "Use get_device_scores() first to see all devices, then drill into specific "
-        "devices with get_device_detail() or get_incident_report()."
+        "Scores update every 5-60 seconds depending on mode. "
+        "Start with get_device_scores() to see all devices, then use "
+        "get_device_detail() or get_incident_report() for specifics."
     ),
 )
 
+# ── Data layer — reads logs/live/ directly ─────────────────────────────────────
+
+_PROJECT_ROOT = pathlib.Path(__file__).parent
+_LIVE_DIR     = _PROJECT_ROOT / "logs" / "live"
+
+
+def _read_all_latest() -> dict:
+    path = _LIVE_DIR / "_all_latest.json"
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _read_device_history(device_id: str, limit: int = 10) -> list:
+    path = _LIVE_DIR / f"{device_id}.jsonl"
+    if not path.exists():
+        return []
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+        rows = []
+        for line in lines[-limit:]:
+            line = line.strip()
+            if not line: continue
+            try:    rows.append(json.loads(line))
+            except: pass
+        return rows
+    except Exception:
+        return []
+
+
+def _normalize(device_id: str, d: dict) -> dict:
+    score  = int(float(d.get("trust_score") or d.get("score") or 0))
+    status = d.get("tier") or d.get("status") or "TRUSTED"
+    reasons = []
+    for v in d.get("violations", []):
+        reasons.append(v.get("reason") or v.get("type") or str(v) if isinstance(v, dict) else str(v))
+    for s in d.get("signals", []):
+        reasons.append(s.get("reason") or s.get("type") or str(s) if isinstance(s, dict) else str(s))
+    raw_ts = d.get("timestamp") or time.time()
+    try:    ts = int(float(raw_ts))
+    except:
+        try:    ts = int(datetime.fromisoformat(str(raw_ts)).timestamp())
+        except: ts = int(time.time())
+    return {
+        "device_id":   device_id,
+        "device_type": d.get("device_type", "unknown"),
+        "score":       score,
+        "status":      status,
+        "reasons":     reasons,
+        "timestamp":   ts,
+    }
+
+
+def _ago(ts: int) -> str:
+    d = int(time.time()) - ts
+    if d < 60:   return f"{d}s ago"
+    if d < 3600: return f"{d//60}m ago"
+    return f"{d//3600}h ago"
+
+
+def _infer_type(did: str) -> str:
+    did = did.lower()
+    if did.startswith("cam"):    return "camera"
+    if did.startswith("bulb"):   return "bulb"
+    if did.startswith("sensor"): return "sensor"
+    return "unknown"
+
+
 # ── Tool: get_device_scores ────────────────────────────────────────────────────
 
-@mcp.tool(
-    description=(
-        "Get current trust scores for all monitored IoT devices. "
-        "Returns device ID, score (0-100), status tier, and how long ago it was updated. "
-        "Status tiers: TRUSTED (80-100), MONITOR (60-79), SUSPICIOUS (40-59), HIGH RISK (<40)."
-    )
-)
+@mcp.tool(description=(
+    "Get current trust scores for all monitored IoT devices. "
+    "Returns device ID, score (0-100), status tier, and time since last update. "
+    "Tiers: TRUSTED (80-100), MONITOR (60-79), SUSPICIOUS (40-59), HIGH RISK (<40)."
+))
 def get_device_scores() -> str:
-    try:
-        from engine.trust import get_latest_scores
-        import time
+    raw = _read_all_latest()
+    if not raw:
+        return (
+            "No device data found.\n"
+            "Is ThrushGuard running? Start with: python main.py\n"
+            f"Expected data at: {_LIVE_DIR}/_all_latest.json"
+        )
 
-        scores = get_latest_scores()
-        if not scores:
-            return "No devices found. Is ThrushGuard running? Try: python main.py"
+    tier_order = {"HIGH RISK": 0, "SUSPICIOUS": 1, "MONITOR": 2, "TRUSTED": 3}
+    devices    = sorted(
+        [_normalize(did, d) for did, d in raw.items()],
+        key=lambda x: tier_order.get(x["status"], 9)
+    )
 
-        now = int(time.time())
-        lines = ["# ThrushGuard Device Trust Scores\n"]
+    icons = {"HIGH RISK": "🔴", "SUSPICIOUS": "🟠", "MONITOR": "🟡", "TRUSTED": "✅"}
+    lines = ["# ThrushGuard — Live Device Trust Scores\n"]
+    for d in devices:
+        icon = icons.get(d["status"], "⏳")
+        lines.append(
+            f"{icon} **{d['device_id']}**  score={d['score']}  "
+            f"{d['status']}  (updated {_ago(d['timestamp'])})"
+        )
+        if d["reasons"]:
+            lines.append(f"   ↳ {'; '.join(d['reasons'][:2])}")
 
-        tier_order = {"HIGH RISK": 0, "SUSPICIOUS": 1, "MONITOR": 2, "TRUSTED": 3, "CALIBRATING": 4}
-        scores.sort(key=lambda d: tier_order.get(d.get("tier", "CALIBRATING"), 9))
-
-        for d in scores:
-            # trust.py stores ISO timestamp strings, not unix ints — handle both
-            raw_ts = d.get("timestamp", "")
-            try:
-                import time as _time
-                from datetime import datetime as _dt
-                if isinstance(raw_ts, (int, float)):
-                    age = int(_time.time()) - int(raw_ts)
-                else:
-                    age = int(_time.time()) - int(_dt.fromisoformat(raw_ts).timestamp())
-                ago = f"{age}s ago" if age < 60 else f"{age//60}m ago"
-            except Exception:
-                ago = "unknown"
-
-            score  = d["score"]
-            status = d.get("tier", "CALIBRATING")  # trust.py uses 'tier'
-
-            if status == "HIGH RISK":
-                icon = "🔴"
-            elif status == "SUSPICIOUS":
-                icon = "🟠"
-            elif status == "MONITOR":
-                icon = "🟡"
-            elif status == "TRUSTED":
-                icon = "✅"
-            else:
-                icon = "⏳"
-
-            lines.append(f"{icon} **{d['device_id']}**  score={score}  {status}  (updated {ago})")
-
-            violations = d.get("violations", [])  # trust.py uses 'violations'
-            if isinstance(violations, str):
-                violations = json.loads(violations)
-            if violations:
-                lines.append(f"   Violations: {'; '.join(violations[:2])}")
-
-        summary = {
-            "TRUSTED":    sum(1 for d in scores if d.get("tier") == "TRUSTED"),
-            "MONITOR":    sum(1 for d in scores if d.get("tier") == "MONITOR"),
-            "SUSPICIOUS": sum(1 for d in scores if d.get("tier") == "SUSPICIOUS"),
-            "HIGH RISK":  sum(1 for d in scores if d.get("tier") == "HIGH RISK"),
-        }
-        lines.append(f"\n**Summary:** {summary}")
-        return "\n".join(lines)
-
-    except Exception as e:
-        return f"Error fetching scores: {e}"
+    summary = {t: sum(1 for d in devices if d["status"] == t)
+               for t in ["TRUSTED", "MONITOR", "SUSPICIOUS", "HIGH RISK"]}
+    lines.append(f"\n**Summary:** {summary}")
+    return "\n".join(lines)
 
 
 # ── Tool: get_device_detail ────────────────────────────────────────────────────
 
-@mcp.tool(
-    description=(
-        "Get full details for a specific IoT device: score history, all violations, "
-        "and trend analysis. Use this after get_device_scores() to investigate a specific device. "
-        "Example: get_device_detail('cam-02')"
-    )
-)
+@mcp.tool(description=(
+    "Get full details for a specific IoT device: score history, violations, trend. "
+    "Use after get_device_scores() to investigate a flagged device. "
+    "Example: get_device_detail('cam-02')"
+))
 def get_device_detail(device_id: str) -> str:
-    try:
-        from engine.trust import get_score_history, get_latest_scores
-        import time
+    raw = _read_all_latest()
+    if device_id not in raw:
+        return (
+            f"Device '{device_id}' not found.\n"
+            f"Valid IDs: {list(raw.keys())}\n"
+            "Run get_device_scores() to see all devices."
+        )
 
-        # Latest score
-        latest_list = [d for d in get_latest_scores() if d["device_id"] == device_id]
-        if not latest_list:
-            return f"Device '{device_id}' not found. Check get_device_scores() for valid IDs."
-        latest = latest_list[0]
+    d       = _normalize(device_id, raw[device_id])
+    history = _read_device_history(device_id, limit=10)
+    scores  = [int(float(h.get("trust_score") or h.get("score") or 0)) for h in history]
 
-        # History
-        history = get_score_history(device_id, limit=10)
-        scores  = [int(h["score"]) for h in reversed(history)]
+    if len(scores) >= 2:
+        delta = scores[-1] - scores[0]
+        trend = f"↓ dropping ({delta:+d} pts)" if delta < -5 else \
+                f"↑ recovering ({delta:+d} pts)" if delta > 5 else "→ stable"
+    else:
+        trend = "insufficient history"
 
-        # Trend
-        if len(scores) >= 2:
-            delta = scores[-1] - scores[0]
-            trend = f"↓ dropping ({delta:+d} pts)" if delta < -5 else \
-                    f"↑ recovering ({delta:+d} pts)" if delta > 5 else \
-                    "→ stable"
-        else:
-            trend = "insufficient data"
+    lines = [
+        f"# Device Detail: {device_id}",
+        f"**Status:** {d['status']}  |  **Score:** {d['score']}/100  |  **Updated:** {_ago(d['timestamp'])}",
+        f"**Type:** {d['device_type']}  |  **Trend:** {trend}",
+        f"**Score history:** {' → '.join(str(s) for s in scores) or 'no history'}",
+        "",
+    ]
+    if d["reasons"]:
+        lines.append("**Active violations/signals:**")
+        for r in d["reasons"]:
+            lines.append(f"  - {r}")
+    else:
+        lines.append("**No active violations.** Device operating normally.")
 
-        violations = latest.get("violations", [])  # trust.py uses 'violations'
-        if isinstance(violations, str):
-            violations = json.loads(violations)
-
-        # trust.py stores ISO timestamp strings
-        raw_ts = latest.get("timestamp", "")
-        try:
-            from datetime import datetime as _dt
-            if isinstance(raw_ts, (int, float)):
-                age = int(time.time()) - int(raw_ts)
-            else:
-                age = int(time.time()) - int(_dt.fromisoformat(raw_ts).timestamp())
-            ago = f"{age}s ago" if age < 60 else f"{age//60}m ago"
-        except Exception:
-            ago = "unknown"
-
-        tier = latest.get("tier", "CALIBRATING")  # trust.py uses 'tier'
-
-        lines = [
-            f"# Device Detail: {device_id}",
-            f"**Status:** {tier}  |  **Score:** {int(latest['score'])}/100  |  **Updated:** {ago}",
-            f"**Trend:** {trend}",
-            f"**Score history:** {' → '.join(str(s) for s in scores)}",
-            "",
-        ]
-
-        if violations:
-            lines.append("**Active violations:**")
-            for r in violations:
-                lines.append(f"  - {r}")
-        else:
-            lines.append("**No active violations.** Device operating normally.")
-
-        if tier in ("HIGH RISK", "SUSPICIOUS"):
-            lines.append(
-                f"\n⚠️  This device is flagged. Run get_incident_report('{device_id}') "
-                f"for a full AI-generated incident narrative."
-            )
-
-        return "\n".join(lines)
-
-    except Exception as e:
-        return f"Error fetching device detail: {e}"
+    if d["status"] in ("HIGH RISK", "SUSPICIOUS"):
+        lines.append(
+            f"\n⚠️  Run get_incident_report('{device_id}') for an AI-generated incident narrative."
+        )
+    return "\n".join(lines)
 
 
 # ── Tool: get_incident_report ──────────────────────────────────────────────────
 
-@mcp.tool(
-    description=(
-        "Generate a plain-English incident report for a device using local AI (phi3:mini via Ollama). "
-        "Explains what happened, the attack vector, timeline, and recommended action. "
-        "Best used on HIGH RISK or SUSPICIOUS devices. "
-        "Ollama must be running: `ollama serve` in a separate terminal. "
-        "Example: get_incident_report('cam-02')"
-    )
-)
+@mcp.tool(description=(
+    "Generate a plain-English incident report using local AI (phi3:mini via Ollama). "
+    "Explains what happened, attack vector, timeline, and recommended action. "
+    "Best on HIGH RISK or SUSPICIOUS devices. Ollama must be running. "
+    "Example: get_incident_report('cam-02')"
+))
 def get_incident_report(device_id: str) -> str:
+    raw = _read_all_latest()
+    if device_id not in raw:
+        return f"Device '{device_id}' not found. Run get_device_scores() for valid IDs."
+
+    d       = _normalize(device_id, raw[device_id])
+    history = _read_device_history(device_id, limit=10)
+    scores  = [int(float(h.get("trust_score") or h.get("score") or 0)) for h in history]
+    dtype   = d["device_type"] or _infer_type(device_id)
+
     try:
-        from engine.trust import get_score_history, get_latest_scores
         from intent.narrator import generate_report, generate_report_fallback
-
-        latest_list = [d for d in get_latest_scores() if d["device_id"] == device_id]
-        if not latest_list:
-            return f"Device '{device_id}' not found."
-
-        latest  = latest_list[0]
-        history = get_score_history(device_id, limit=10)
-        scores  = [int(h["score"]) for h in reversed(history)]
-
-        violations = latest.get("violations", [])  # trust.py uses 'violations'
-        if isinstance(violations, str):
-            violations = json.loads(violations)
-
-        # device_type is not stored in scores table — derive from device_id prefix
-        did = device_id.lower()
-        if did.startswith("cam"):
-            dtype = "camera"
-        elif did.startswith("bulb"):
-            dtype = "bulb"
-        elif did.startswith("sensor") or did.startswith("snr"):
-            dtype = "sensor"
-        else:
-            dtype = "unknown"
-
-        # Try Ollama first; generate_report internally falls back if Ollama is down
-        report = generate_report(
-            device_id     = device_id,
-            violations    = violations,
-            score_history = scores,
-            device_type   = dtype,
-        )
+        report = generate_report(device_id, d["reasons"], scores, dtype)
         if not report:
-            report = generate_report_fallback(
-                device_id     = device_id,
-                violations    = violations,
-                score_history = scores,
-                device_type   = dtype,
-            )
-            report += "\n\n*Note: Ollama unavailable — using template report.*"
+            report = generate_report_fallback(device_id, d["reasons"], scores, dtype)
+            report += "\n\n*Note: Ollama unavailable — template report used.*"
+    except ImportError:
+        severity = "CRITICAL" if d["score"] < 40 else "HIGH" if d["score"] < 60 else "MEDIUM"
+        report = (
+            f"## Incident Report — {device_id}\n"
+            f"**Severity:** {severity}\n"
+            f"**Score:** {d['score']}/100  ({d['status']})\n"
+            f"**Score history:** {' → '.join(str(s) for s in scores) or 'N/A'}\n\n"
+            f"**Violations detected:**\n"
+        )
+        for r in (d["reasons"] or ["None"]):
+            report += f"  - {r}\n"
+        report += "\n**Recommended action:** " + (
+            "Isolate device immediately and investigate." if d["score"] < 40
+            else "Monitor closely over next 5 windows."
+        )
 
-        # Save to file
-        import time
-        os.makedirs("reports", exist_ok=True)
-        fname = f"reports/{device_id}_{int(time.time())}.md"
-        with open(fname, "w") as f:
-            f.write(report)
+    os.makedirs("reports", exist_ok=True)
+    fname = f"reports/{device_id}_{int(time.time())}.md"
+    with open(fname, "w") as f:
+        f.write(report)
 
-        return report + f"\n\n*Saved to: {fname}*"
-
-    except Exception as e:
-        return f"Error generating report: {e}"
+    return report + f"\n\n*Saved to: {fname}*"
 
 
 # ── Tool: verify_audit_chain ───────────────────────────────────────────────────
 
-@mcp.tool(
-    description=(
-        "Verify the tamper-evident audit log hash chain integrity. "
-        "Returns whether all entries are intact and the total event count. "
-        "A broken chain means audit log may have been tampered with."
-    )
-)
+@mcp.tool(description=(
+    "Verify the tamper-evident audit log hash chain integrity. "
+    "Returns chain status and total event count."
+))
 def verify_audit_chain() -> str:
     try:
         from compliance.audit import AuditLog
-        result = AuditLog.verify()
+        result   = AuditLog.verify()
         verified = result.get("verified", False)
         entries  = result.get("entries", 0)
-
         if verified:
-            return (
-                f"✅ Audit chain intact.\n"
-                f"**Total events logged:** {entries}\n"
-                f"All {entries} entries verified — no tampering detected."
-            )
-        else:
-            broken_at = result.get("broken_at", "unknown")
-            return (
-                f"🔴 Audit chain BROKEN at entry {broken_at}.\n"
-                f"**Total events:** {entries}\n"
-                f"Hash mismatch detected — log may have been tampered with."
-            )
+            return f"✅ Audit chain intact. {entries} events logged — no tampering detected."
+        broken_at = result.get("broken_at", "unknown")
+        return f"🔴 Chain BROKEN at entry {broken_at}. {entries} total events. Possible tampering."
     except ImportError:
-        return "Audit log module not available."
+        return "Audit log module not available (compliance/audit.py not found)."
     except Exception as e:
-        return f"Error verifying chain: {e}"
+        return f"Error: {e}"
 
 
-# ── Background runner (called by main.py) ─────────────────────────────────────
-
-def start_mcp_background():
-    """
-    Start MCP server in a background thread using SSE transport.
-    Called by main.py step 6 alongside FastAPI.
-    Port 8001 (FastAPI takes 8000).
-    """
-    import threading
-
-    def _run():
-        try:
-            mcp.run(transport="sse", port=8001, host="127.0.0.1")
-        except Exception as e:
-            logging.getLogger("thrushguard.mcp").warning(f"MCP server error: {e}")
-
-    t = threading.Thread(target=_run, daemon=True, name="mcp-server")
-    t.start()
-    return t
-
-
-# ── Standalone entry point ────────────────────────────────────────────────────
+# ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # stdio transport for Claude Desktop
-    print("ThrushGuard MCP Server starting (stdio)...", file=sys.stderr)
-    mcp.run(transport="stdio")
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=4242)
+    parser.add_argument("--transport", default="stdio", choices=["stdio", "sse"])
+    a = parser.parse_args()
+    print(f"ThrushGuard MCP Server starting ({a.transport})...", file=sys.stderr)
+    print(f"Data source: {_LIVE_DIR}", file=sys.stderr)
+    if a.transport == "sse":
+        print(f"Listening on port {a.port}", file=sys.stderr)
+        mcp.settings.port = a.port
+        mcp.settings.host = "0.0.0.0"
+        # Disable DNS rebinding protection so LAN clients can connect
+        from mcp.server.transport_security import TransportSecuritySettings
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False
+        )
+        mcp.run(transport="sse")
+    else:
+        mcp.run(transport="stdio")
