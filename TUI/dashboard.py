@@ -1,24 +1,21 @@
 """
-TUI/dashboard.py — ThrushGuard Interactive Dashboard
-btop-inspired layout, live updates, device selection, Ollama incident reports.
+TUI/dashboard.py — ThrushGuard Dashboard
+Clean rewrite — no Rich Live, no tty conflicts.
+Uses os.system('clear') + Rich Console.print each frame.
+
+Controls: [1-9] select  [r] AI report  [i] inspect  [c] clear  [q] quit
 """
 
-import os
-import sys
-import time
-import json
-import queue
-import threading
+import os, sys, time, json, queue, threading, select
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from rich.console import Console
-from rich.layout import Layout
-from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.columns import Columns
 from rich import box
 
 from engine.trust import get_latest_scores, get_score_history
@@ -34,17 +31,13 @@ try:
 except ImportError:
     NARRATOR_AVAILABLE = False
     def generate_report(*a, **k): return None
-    def generate_report_fallback(device_id, violations, score_history, device_type):
-        return f"## {device_id}\nOllama unavailable. Violations:\n" + "\n".join(f"- {v}" for v in violations)
+    def generate_report_fallback(did, v, h, t):
+        return f"## {did}\nViolations:\n" + "\n".join(f"- {x}" for x in v)
 
+# ── Constants ──────────────────────────────────────────────────────────────────
 
 SPARK = "▁▂▃▄▅▆▇█"
 SPIN  = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-
-DEVICE_ICONS = {
-    "camera": "[CAM]", "bulb": "[LIT]", "sensor": "[SNR]",
-    "thermostat": "[THM]", "router": "[RTR]", "lock": "[LCK]",
-}
 
 STATUS_DATA = {
     "TRUSTED":     {"color": "green",       "icon": "✓", "label": "TRUSTED "},
@@ -54,68 +47,88 @@ STATUS_DATA = {
     "CALIBRATING": {"color": "dim",         "icon": "∞", "label": "CALIB..."},
 }
 
+ICONS = {
+    "camera": "[CAM]", "bulb": "[LIT]", "sensor": "[SNR]",
+    "thermostat": "[THM]", "router": "[RTR]", "lock": "[LCK]",
+}
 
-_selected_idx:      int  = 0
-_violations_feed:   list = []        # [(ts_str, device_id, reason, score), ...]
-_last_seen_ts:      dict = {}        # device_id → timestamp, for dedup
-_report_panel:      list = []        # lines shown in report panel
-_report_device:     str  = ""
-_report_generating: bool = False
-_input_queue:       queue.Queue = queue.Queue()
-_stop_event:        threading.Event = threading.Event()
-_tick:              int  = 0
+# ── Global state ───────────────────────────────────────────────────────────────
 
-console = Console()
+_sel     = 0
+_viols   = []      # [(ts_str, device_id, reason, score)]
+_seen_ts = {}      # device_id → ts int, for dedup
+_rlines  = []      # report panel lines
+_rdevice = ""
+_rgen    = False
+_tick    = 0
+_stop    = threading.Event()
 
+console = Console(highlight=False)
 
-def score_color(score: int) -> str:
-    if score >= 80: return "green"
-    if score >= 60: return "yellow"
-    if score >= 40: return "dark_orange"
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _color(score):
+    s = int(float(score or 0))
+    if s >= 80: return "green"
+    if s >= 60: return "yellow"
+    if s >= 40: return "dark_orange"
     return "red"
 
-def score_bar(score: int, width: int = 16) -> Text:
-    filled = int((score / 100) * width)
-    return Text("█" * filled + "░" * (width - filled), style=score_color(score))
+def _bar(score, w=16):
+    s = int(float(score or 0))
+    f = int((s / 100) * w)
+    return Text("█"*f + "░"*(w-f), style=_color(s))
 
-def sparkline(device_id: str, width: int = 8) -> Text:
-    rows   = get_score_history(device_id, limit=width)
-    scores = [r["score"] for r in reversed(rows)]
-    if not scores:
-        return Text("░" * width, style="dim")
-    chars = "".join(SPARK[min(7, int(s / 100 * 8))] for s in scores)
-    return Text(chars.rjust(width, "░"), style=score_color(scores[-1]))
+def _spark(did, w=8):
+    rows   = get_score_history(did, limit=w)
+    scores = [int(float(r.get("score") or 0)) for r in reversed(rows)]
+    if not scores: return Text("░"*w, style="dim")
+    chars  = "".join(SPARK[min(7, int(s/100*8))] for s in scores)
+    return Text(chars.rjust(w, "░"), style=_color(scores[-1]))
 
-def time_ago(ts: int) -> str:
-    diff = int(time.time()) - ts
-    if diff < 5:    return "now"
-    if diff < 60:   return f"{diff}s"
-    if diff < 3600: return f"{diff//60}m"
-    return f"{diff//3600}h"
+def _status(d):
+    return d.get("status") or d.get("tier") or "TRUSTED"
 
-def infer_type(device_id: str) -> str:
-    for t in DEVICE_ICONS:
-        if device_id.startswith(t[:3]):
-            return t
+def _ts(d):
+    raw = d.get("timestamp") or time.time()
+    try:    return int(float(raw))
+    except:
+        try:    return int(datetime.fromisoformat(str(raw)).timestamp())
+        except: return int(time.time())
+
+def _ago(ts):
+    d = int(time.time()) - ts
+    if d < 5:    return "now"
+    if d < 60:   return f"{d}s"
+    if d < 3600: return f"{d//60}m"
+    return f"{d//3600}h"
+
+def _reasons(d):
+    raw = d.get("reasons", [])
+    if isinstance(raw, str):
+        try:    raw = json.loads(raw)
+        except: return []
+    out = []
+    for r in raw:
+        if isinstance(r, dict):
+            out.append(r.get("reason") or f"{r.get('type','?')} {r.get('value','')}")
+        else:
+            out.append(str(r))
+    return out
+
+def _infer_type(did):
+    for t in ICONS:
+        if did.startswith(t[:3]): return t
     return "unknown"
 
-def parse_reasons(raw) -> list:
-    if isinstance(raw, list): return raw
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw or "[]")
-        except json.JSONDecodeError:
-            return [raw] if raw else []
-    return []
+# ── Panels ─────────────────────────────────────────────────────────────────────
 
-
-def build_header(devices: list) -> Panel:
-    trusted = sum(1 for d in devices if d.get("tier", d.get("status", "")) == "TRUSTED")
-    monitor = sum(1 for d in devices if d.get("tier", d.get("status", "")) == "MONITOR")
-    risky   = sum(1 for d in devices if d.get("tier", d.get("status", "")) in ("HIGH RISK", "SUSPICIOUS"))
+def _header(devices):
+    trusted = sum(1 for d in devices if _status(d) == "TRUSTED")
+    monitor = sum(1 for d in devices if _status(d) == "MONITOR")
+    risky   = sum(1 for d in devices if _status(d) in ("HIGH RISK", "SUSPICIOUS"))
     spin    = SPIN[_tick % len(SPIN)]
     clock   = datetime.now().strftime("%H:%M:%S")
-
     t = Text()
     t.append(f" {spin} ", style="cyan")
     t.append("THRUSHGUARD  LOCAL_ENGINE", style="bold cyan")
@@ -127,363 +140,278 @@ def build_header(devices: list) -> Panel:
     t.append(f"✕ {risky}", style="bold red")
     t.append("  │  ", style="dim")
     if NARRATOR_AVAILABLE:
-        t.append("AI:phi3", style="dim green")
-        t.append("  │  ", style="dim")
+        t.append("AI:phi3  │  ", style="dim green")
     t.append(clock, style="dim")
-
     return Panel(t, border_style="cyan", height=3)
 
 
-def build_table(devices: list) -> Panel:
-    cols = console.size.width
-    bar_width  = 18 if cols >= 140 else 14 if cols >= 100 else 10
-    show_drift = cols >= 100
-    show_type  = cols >= 80
+def _table(devices):
+    tbl = Table(box=box.SIMPLE_HEAVY, expand=True,
+                border_style="bright_black",
+                header_style="bold bright_black", padding=(0, 1))
+    tbl.add_column("#",      width=3,  justify="right")
+    tbl.add_column("DEVICE", width=13)
+    tbl.add_column("TYPE",   width=7)
+    tbl.add_column("SCORE",  width=5,  justify="right")
+    tbl.add_column("TRUST",  width=18)
+    tbl.add_column("STATUS", width=10)
+    tbl.add_column("DRIFT",  width=9)
+    tbl.add_column("AGO",    width=5)
 
-    table = Table(
-        box=box.SIMPLE_HEAVY, expand=True,
-        border_style="bright_black",
-        header_style="bold bright_black",
-        padding=(0, 1),
-    )
-    table.add_column("#",      width=3,          justify="right")
-    table.add_column("DEVICE", width=13)
-    if show_type:
-        table.add_column("TYPE",  width=7)
-    table.add_column("SCORE",  width=5,          justify="right")
-    table.add_column("TRUST",  width=bar_width+2)
-    table.add_column("STATUS", width=11)
-    if show_drift:
-        table.add_column("DRIFT", width=9)
-
-    device_states = get_device_states()
+    states   = get_device_states()
     blink_on = (_tick % 2 == 0)
 
     if not devices:
-        table.add_row("", Text("Waiting for device data...", style="dim"), "", "", "", "")
-        return Panel(table, title="[bold]IoT Device Inventory[/]", border_style="bright_black")
+        tbl.add_row("", Text("─── waiting for device data ───", style="dim"),
+                    "", "", "", "", "", "")
+        return Panel(tbl, title="[bold]IoT Device Inventory[/]", border_style="bright_black")
 
-    for idx, d in enumerate(devices):
+    for i, d in enumerate(devices):
         did    = d["device_id"]
-        score  = d.get("score", d.get("trust_score", 0))
-        status = d.get("status", d.get("tier", "TRUSTED"))
-        ts     = d.get("timestamp", int(time.time()))
-        
-        # Handle parsed timestamp format
-        if isinstance(ts, str):
-            try:
-                ts = int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
-            except:
-                ts = int(time.time())
+        score  = int(float(d.get("score") or 0))
+        status = _status(d)
+        ts     = _ts(d)
+        dtype  = d.get("device_type") or _infer_type(did)
+        icon   = ICONS.get(dtype, "[DEV]")
+        rs     = _reasons(d)
 
-        # Calibrating override
-        if device_states.get(did) == "CALIBRATING":
+        if states.get(did) == "CALIBRATING":
             status = "CALIBRATING"
 
-        reasons  = parse_reasons(d.get("reasons", d.get("violations", [])))
-        selected = (idx == _selected_idx)
-        is_risk  = (status == "HIGH RISK")
-        s_data   = STATUS_DATA.get(status, STATUS_DATA["TRUSTED"])
-        dtype    = d.get("device_type") or infer_type(did)
-        icon     = DEVICE_ICONS.get(dtype, "[DEV]")
+        # push to violations feed (dedup)
+        ts_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+        if rs and status in ("HIGH RISK", "SUSPICIOUS", "MONITOR"):
+            if _seen_ts.get(did) != ts:
+                _seen_ts[did] = ts
+                for r in rs:
+                    _viols.insert(0, (ts_str, did, r, score))
+                while len(_viols) > 8:
+                    _viols.pop()
 
-        # Row style
-        if is_risk and blink_on:
-            row_style = "on dark_red"
-        elif selected:
-            row_style = "on grey19"
+        sel  = (i == _sel)
+        risk = (status == "HIGH RISK")
+        sd   = STATUS_DATA.get(status, STATUS_DATA["TRUSTED"])
+
+        if risk and blink_on: row_style = "on dark_red"
+        elif sel:             row_style = "on grey19"
+        else:                 row_style = ""
+
+        num = Text(f"▶{i+1}" if sel else f" {i+1}",
+                   style="bold cyan" if sel else "dim")
+
+        if status == "CALIBRATING":
+            sc_t = Text("---", style="dim")
+            br_t = Text("░"*16, style="dim")
+            sp_t = Text("░"*8,  style="dim")
         else:
-            row_style = ""
+            sc_t = Text(str(score), style=f"bold {_color(score)}")
+            br_t = _bar(score)
+            sp_t = _spark(did)
 
-        # Number + selection indicator
-        num = Text(
-            f"▶{idx+1}" if selected else f" {idx+1}",
-            style="bold cyan" if selected else "dim"
+        st_t = Text()
+        st_t.append(f"{sd['icon']} ", style=sd["color"])
+        st_t.append(sd["label"], style=f"bold {sd['color']}")
+
+        tbl.add_row(
+            num,
+            Text(did, style="bold white" if sel else "white"),
+            Text(icon, style="dim cyan"),
+            sc_t, br_t, st_t, sp_t,
+            Text(_ago(ts), style="dim"),
+            style=row_style,
         )
 
-        # Score + bar
-        if status == "CALIBRATING":
-            score_t = Text("---", style="dim")
-            bar_t   = Text("░" * bar_width, style="dim")
-            spark_t = Text("░" * 8, style="dim")
-        else:
-            score_t = Text(str(score), style=f"bold {score_color(score)}")
-            bar_t   = score_bar(score, bar_width)
-            spark_t = sparkline(did)
-
-        # Status cell
-        status_t = Text()
-        status_t.append(f"{s_data['icon']} ", style=s_data["color"])
-        status_t.append(s_data["label"], style=f"bold {s_data['color']}")
-
-        row = [num, Text(did, style="bold white" if selected else "white")]
-        if show_type:
-            row.append(Text(icon, style="dim cyan"))
-        row += [score_t, bar_t, status_t]
-        if show_drift:
-            row.append(spark_t)
-
-        table.add_row(*row, style=row_style)
-
-        # Push violations to feed (dedup by timestamp)
-        if reasons and _last_seen_ts.get(did) != ts:
-            _last_seen_ts[did] = ts
-            ts_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
-            for r in reasons:
-                # Handle dictionary reasons (detail/reason attributes)
-                text = r
-                if isinstance(r, dict):
-                    text = r.get("detail", r.get("reason", str(r)))
-                _violations_feed.insert(0, (ts_str, did, text, score))
-            while len(_violations_feed) > 8:
-                _violations_feed.pop()
-
     title = "[bold]IoT Device Inventory[/]"
-    if _selected_idx < len(devices):
-        sel = devices[_selected_idx]
-        title += f"  [dim]selected: {sel['device_id']}[/]"
-
-    return Panel(table, title=title, border_style="bright_black")
+    if _sel < len(devices):
+        title += f"  [dim]selected: {devices[_sel]['device_id']}[/]"
+    return Panel(tbl, title=title, border_style="bright_black")
 
 
-def build_violations() -> Panel:
+def _violations():
     t = Text()
-    if not _violations_feed:
+    if not _viols:
         t.append("No violations detected.", style="dim")
     else:
-        for ts_str, did, reason, score in _violations_feed:
+        for ts_str, did, reason, score in _viols:
             t.append(f" {ts_str} ", style="dim")
-            t.append(f"{did:<12}", style=f"bold {score_color(score)}")
-            t.append(f"\n   {reason}\n", style="white")
+            t.append(f"{did:<12}", style=f"bold {_color(score)}")
+            t.append(f" {reason}\n", style="white")
+    return Panel(t, title="[bold]Violations[/]", border_style="bright_black", height=12)
 
-    return Panel(t, title="[bold]Violations[/]", border_style="bright_black")
 
-
-def build_report() -> Panel:
+def _report():
     t = Text()
-
-    if _report_generating:
+    if _rgen:
         spin = SPIN[_tick % len(SPIN)]
-        t.append(f"\n  {spin} ", style="cyan")
-        t.append("Generating incident report...\n", style="dim cyan")
-        t.append(f"\n  Model: phi3:mini via Ollama\n", style="dim")
-        t.append(f"  Device: {_report_device}\n", style="dim")
-        t.append(f"\n  This takes 5-10 seconds.\n", style="dim")
-
-    elif _report_panel:
-        for line in _report_panel:
+        t.append(f"\n  {spin} Generating report via phi3:mini...\n", style="dim cyan")
+        t.append(f"  Device: {_rdevice}   (~8 seconds)\n", style="dim")
+    elif _rlines:
+        for line in _rlines:
             t.append(line + "\n")
-
     else:
-        t.append("\n  Select a device ", style="dim")
+        t.append("\n  Select device ", style="dim")
         t.append("[1-9]", style="bold cyan")
-        t.append(" then press ", style="dim")
+        t.append("  then press ", style="dim")
         t.append("[r]", style="bold cyan")
-        t.append(" for AI report  or  ", style="dim")
+        t.append(" AI report  or  ", style="dim")
         t.append("[i]", style="bold cyan")
-        t.append(" for instant inspect.\n", style="dim")
+        t.append(" instant inspect\n", style="dim")
         if not NARRATOR_AVAILABLE:
-            t.append("\n  [dim red]narrator.py not found — [r] unavailable[/dim red]\n")
-
+            t.append("\n  [dim]narrator.py not found[/dim]\n")
     title = "[bold]Incident Report[/]"
-    if _report_device:
-        title += f"  [dim]— {_report_device}[/]"
+    if _rdevice:
+        title += f"  [dim]— {_rdevice}[/]"
+    return Panel(t, title=title, border_style="cyan", height=12)
 
-    return Panel(t, title=title, border_style="cyan")
 
-
-def build_keybindings(devices: list) -> Panel:
+def _keybindings(devices):
     t = Text()
     t.append(" [1-9]", style="bold cyan"); t.append(" select  ", style="dim")
-    t.append("[r]",    style="bold cyan"); t.append(" AI report  ", style="dim")
+    t.append("[r]",    style="bold cyan"); t.append(" report  ", style="dim")
     t.append("[i]",    style="bold cyan"); t.append(" inspect  ", style="dim")
     t.append("[c]",    style="bold cyan"); t.append(" clear  ", style="dim")
     t.append("[q]",    style="bold cyan"); t.append(" quit", style="dim")
-
-    if devices and _selected_idx < len(devices):
-        sel    = devices[_selected_idx]
-        status = sel.get("status", sel.get("tier", "TRUSTED"))
-        score  = sel.get("score", sel.get("trust_score", 100))
-        s_data = STATUS_DATA.get(status, STATUS_DATA["TRUSTED"])
+    if devices and _sel < len(devices):
+        d  = devices[_sel]
+        st = _status(d)
+        sd = STATUS_DATA.get(st, STATUS_DATA["TRUSTED"])
+        sc = int(float(d.get("score") or 0))
         t.append("  │  ", style="dim")
-        t.append(f"{sel['device_id']}", style="bold white")
-        t.append(f"  {s_data['icon']} {status}", style=f"bold {s_data['color']}")
-        t.append(f"  score={score}", style=f"bold {score_color(score)}")
-
+        t.append(d["device_id"], style="bold white")
+        t.append(f"  {sd['icon']} {st}", style=f"bold {sd['color']}")
+        t.append(f"  score={sc}", style=f"bold {_color(sc)}")
     return Panel(t, border_style="bright_black", height=3)
 
+# ── Input (non-blocking via select) ───────────────────────────────────────────
 
-def build_layout(devices: list) -> Layout:
-    layout = Layout()
-    layout.split_column(
-        Layout(build_header(devices),    name="header",   size=3),
-        Layout(build_table(devices),     name="table",    ratio=1),
-        Layout(name="bottom",            size=14),
-        Layout(build_keybindings(devices), name="keys",   size=3),
-    )
-    layout["bottom"].split_row(
-        Layout(build_violations(), name="violations"),
-        Layout(build_report(),     name="report"),
-    )
-    return layout
+def _setup_term():
+    import termios, tty
+    fd  = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    return fd, old
 
+def _restore_term(fd, old):
+    import termios
+    termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
-def _input_thread():
-    if os.name == 'nt':
-        import msvcrt
-        while not _stop_event.is_set():
-            if msvcrt.kbhit():
-                ch = msvcrt.getch()
-                try:
-                    _input_queue.put(ch.decode('utf-8'))
-                except Exception:
-                    pass
-            time.sleep(0.05)
-        return
+def _poll_key(fd):
+    r, _, _ = select.select([sys.stdin], [], [], 0)
+    if r:
+        return sys.stdin.read(1)
+    return None
 
-    try:
-        import termios, tty
-        fd  = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setraw(fd)
-            while not _stop_event.is_set():
-                import select
-                r, _, _ = select.select([sys.stdin], [], [], 0.1)
-                if r:
-                    ch = sys.stdin.read(1)
-                    if ch: _input_queue.put(ch)
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    except Exception:
-        pass
+# ── Input handler ──────────────────────────────────────────────────────────────
 
+def _handle(ch, devices):
+    global _sel, _viols, _seen_ts, _rlines, _rdevice, _rgen
 
-def handle_input(ch: str, devices: list):
-    global _selected_idx, _violations_feed, _last_seen_ts
-    global _report_panel, _report_device, _report_generating
-
-    # Quit
     if ch in ("q", "Q", "\x03"):
-        _stop_event.set()
-        return
+        _stop.set(); return
 
-    # Clear
     if ch in ("c", "C"):
-        _violations_feed.clear()
-        _last_seen_ts.clear()
-        _report_panel.clear()
-        _report_device = ""
+        _viols.clear(); _seen_ts.clear()
+        _rlines.clear(); _rdevice = ""
         return
 
-    # Select device
     if ch.isdigit():
         idx = int(ch) - 1
-        if 0 <= idx < len(devices):
-            _selected_idx = idx
+        if 0 <= idx < len(devices): _sel = idx
         return
 
-    # [r] AI incident report
-    if ch in ("r", "R"):
-        if _report_generating or not devices: return
-        if not NARRATOR_AVAILABLE:
-            _report_panel = ["  [red]narrator.py not built.[/red]"]
-            return
-        sel = devices[_selected_idx]
-        _report_device    = sel["device_id"]
-        _report_generating = True
-        _report_panel      = []
-
-        def _run():
-            global _report_panel, _report_generating
-            try:
-                history = get_score_history(sel["device_id"], limit=10)
-                scores  = [h["score"] for h in reversed(history)]
-                reasons = parse_reasons(sel.get("reasons", sel.get("violations", [])))
-                dtype   = sel.get("device_type") or infer_type(sel["device_id"])
-                
-                # Format reasons correctly if dicts
-                formatted_reasons = []
-                for r in reasons:
-                    if isinstance(r, dict):
-                        formatted_reasons.append(r.get("detail", r.get("reason", str(r))))
-                    else:
-                        formatted_reasons.append(str(r))
-
-                report = generate_report(sel["device_id"], formatted_reasons, scores, dtype)
-                if not report:
-                    report = generate_report_fallback(sel["device_id"], formatted_reasons, scores, dtype)
-
-                os.makedirs("reports", exist_ok=True)
-                fname = f"reports/{sel['device_id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-                with open(fname, "w") as f: f.write(report)
-
-                lines = report.split("\n")
-                _report_panel = lines[:12] + [f"[dim]Saved → {fname}[/dim]"]
-            except Exception as e:
-                _report_panel = [f"[red]Error: {e}[/red]"]
-            finally:
-                _report_generating = False
-
-        threading.Thread(target=_run, daemon=True, name="narrator").start()
-        return
-
-    # [i] Instant inspect — no Ollama
-    if ch in ("i", "I"):
-        if not devices: return
-        sel     = devices[_selected_idx]
+    if ch in ("i", "I") and devices:
+        sel     = devices[_sel]
         history = get_score_history(sel["device_id"], limit=10)
-        scores  = [h["score"] for h in reversed(history)]
-        reasons = parse_reasons(sel.get("reasons", sel.get("violations", [])))
-        status  = sel.get("status", sel.get("tier", "TRUSTED"))
-        score   = sel.get("score", sel.get("trust_score", 100))
-        
-        # Format reasons correctly if dicts
-        formatted_reasons = []
-        for r in reasons:
-            if isinstance(r, dict):
-                formatted_reasons.append(r.get("detail", r.get("reason", str(r))))
-            else:
-                formatted_reasons.append(str(r))
-
-        _report_device = sel["device_id"]
-        _report_panel  = [
+        scores  = [int(float(r.get("score") or 0)) for r in reversed(history)]
+        rs      = _reasons(sel)
+        _rdevice = sel["device_id"]
+        _rlines  = [
             f"## Inspect — {sel['device_id']}",
-            f"Score: {score}  Status: {status}",
+            f"Score: {int(float(sel.get('score') or 0))}  Status: {_status(sel)}",
             f"Trend: {' → '.join(str(s) for s in scores)}",
             "",
-            "Violations:" if formatted_reasons else "No active violations.",
-        ] + [f"  - {r}" for r in formatted_reasons]
+            "Violations:" if rs else "No active violations.",
+        ] + [f"  - {r}" for r in rs]
         return
 
+    if ch in ("r", "R") and devices and not _rgen:
+        if not NARRATOR_AVAILABLE:
+            _rlines = ["  narrator.py not found."]; return
+        sel      = devices[_sel]
+        _rdevice = sel["device_id"]
+        _rgen    = True
+        _rlines  = []
+
+        def _run():
+            global _rlines, _rgen
+            try:
+                history = get_score_history(sel["device_id"], limit=10)
+                scores  = [int(float(r.get("score") or 0)) for r in reversed(history)]
+                rs      = _reasons(sel)
+                dtype   = sel.get("device_type") or _infer_type(sel["device_id"])
+                report  = generate_report(sel["device_id"], rs, scores, dtype)
+                if not report:
+                    report = generate_report_fallback(sel["device_id"], rs, scores, dtype)
+                os.makedirs("reports", exist_ok=True)
+                fname = f"reports/{sel['device_id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+                with open(fname, "w") as f:
+                    f.write(report)
+                lines   = report.split("\n")
+                _rlines = lines[:12] + [f"[dim]→ {fname}[/dim]"]
+            except Exception as e:
+                _rlines = [f"[red]Error: {e}[/red]"]
+            finally:
+                _rgen = False
+
+        threading.Thread(target=_run, daemon=True).start()
+
+# ── Main loop ──────────────────────────────────────────────────────────────────
 
 def run_dashboard():
-    global _tick, _selected_idx
+    global _tick, _sel
 
-    threading.Thread(target=_input_thread, daemon=True, name="input").start()
+    fd, old_term = _setup_term()
+    sys.stdout.write("\033[?25l"); sys.stdout.flush()  # hide cursor
+
+    _last_render = 0
+    _last_devices = None
 
     try:
-        with Live(refresh_per_second=4, screen=True, console=console) as live:
-            while not _stop_event.is_set():
-                # Drain input
-                while not _input_queue.empty():
-                    ch = _input_queue.get_nowait()
-                    devices = get_latest_scores()
-                    handle_input(ch, devices)
-
-                _tick += 1
+        while not _stop.is_set():
+            ch = _poll_key(fd)
+            if ch:
                 devices = get_latest_scores()
-                if devices:
-                    _selected_idx = min(_selected_idx, len(devices) - 1)
+                _handle(ch, devices)
+                _last_devices = None  # force redraw on keypress
 
-                live.update(build_layout(devices))
-                time.sleep(0.25)
+            now = time.time()
+            # Redraw at most once per second, or immediately on keypress
+            if now - _last_render < 1.0 and _last_devices is not None:
+                time.sleep(0.05)
+                continue
+
+            _tick += 1
+            _last_render = now
+            devices = get_latest_scores()
+            _last_devices = devices
+            if devices:
+                _sel = min(_sel, len(devices) - 1)
+
+            sys.stdout.write("\033[H"); sys.stdout.flush()  # cursor to top, no flicker
+            console.print(_header(devices))
+            console.print(_table(devices))
+            console.print(Columns([_violations(), _report()], equal=True, expand=True))
+            console.print(_keybindings(devices))
+            sys.stdout.write("\033[J"); sys.stdout.flush()  # clear below
+
+            time.sleep(0.05)
 
     except KeyboardInterrupt:
         pass
     finally:
-        _stop_event.set()
-        console.clear()
+        _restore_term(fd, old_term)
+        sys.stdout.write("\033[?25h"); sys.stdout.flush()  # show cursor
+        sys.stdout.write("\033[2J\033[H"); sys.stdout.flush()
         console.print("\n[bold cyan]ThrushGuard[/] — disconnected.\n")
 
 
