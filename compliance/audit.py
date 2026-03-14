@@ -21,7 +21,11 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.environ.get("ECLIPSE_DB_PATH", "eclipse.db")
+# ── DB Configuration ─────────────────────────────────────────────────────────
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_THIS_DIR, ".."))
+
+DB_PATH = os.environ.get("ECLIPSE_DB_PATH", os.path.join(_PROJECT_ROOT, "eclipse.db"))
 GENESIS_HASH = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
 COMPLIANCE_MAP = {
@@ -73,32 +77,34 @@ class AuditLog:
         prev_hash = _get_last_hash()
         ts = datetime.now(timezone.utc).isoformat()
 
-        body = {
-            "timestamp":   ts,
-            "event_type":  event_type,
-            "device_id":   device_id,
+        event_body = {
             "details":     details,
             "score_before": score_before,
             "score_after":  score_after,
         }
-        entry_hash = _compute_hash(prev_hash, body)
+        
+        body_to_hash = {
+            "timestamp":   ts,
+            "event_type":  event_type,
+            "device_id":   device_id,
+            "event_body":  event_body,
+        }
+        entry_hash = _compute_hash(prev_hash, body_to_hash)
 
         conn = _get_conn()
         try:
             conn.execute(
                 """INSERT INTO audit_log
-                   (timestamp, event_type, device_id, details,
-                    score_before, score_after, prev_hash, hash)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (ts, event_type, device_id, details,
-                 score_before, score_after, prev_hash, entry_hash)
+                   (timestamp, event_type, device_id, event_body, hash)
+                   VALUES (?,?,?,?,?)""",
+                (ts, event_type, device_id, json.dumps(event_body), entry_hash)
             )
             conn.commit()
         finally:
             conn.close()
 
         logger.debug(f"[Audit] {event_type} {device_id} hash={entry_hash[:20]}...")
-        return {**body, "prev_hash": prev_hash, "hash": entry_hash}
+        return {**body_to_hash, "hash": entry_hash}
 
     @staticmethod
     def verify() -> dict:
@@ -121,12 +127,13 @@ class AuditLog:
                 "timestamp":    entry["timestamp"],
                 "event_type":   entry["event_type"],
                 "device_id":    entry["device_id"],
-                "details":      entry["details"],
-                "score_before": entry["score_before"],
-                "score_after":  entry["score_after"],
+                "event_body":   json.loads(entry["event_body"]),
             }
-            expected_hash = _compute_hash(entry["prev_hash"], body)
-            if expected_hash != entry["hash"] or entry["prev_hash"] != prev_hash:
+            # Note: We need to know the prev_hash to verify. 
+            # In the new schema provided by Task 4, prev_hash isn't a column.
+            # We must assume the chain is valid if current.hash == SHA256(prev.hash + current.body)
+            expected_hash = _compute_hash(prev_hash, body)
+            if expected_hash != entry["hash"]:
                 logger.warning(f"[Audit] Chain broken at id={entry['id']}")
                 return {
                     "verified": False,

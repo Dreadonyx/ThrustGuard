@@ -51,6 +51,7 @@ desktop.ini
 
 # ── Environment variables ─────────────────────────────────────────────────────
 .env
+.venv
 .env.*
 !.env.example
 

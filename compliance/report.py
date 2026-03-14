@@ -13,10 +13,15 @@ ISO 27001 / SOC-2 event mapping (from audit.py):
 """
 
 import os
+import json
 from datetime import datetime, timezone
 
 
-DB_PATH = os.environ.get("ECLIPSE_DB_PATH", "eclipse.db")
+# ── DB Configuration ─────────────────────────────────────────────────────────
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_THIS_DIR, ".."))
+
+DB_PATH = os.environ.get("ECLIPSE_DB_PATH", os.path.join(_PROJECT_ROOT, "eclipse.db"))
 
 COMPLIANCE_MAP = {
     "score_update":    ("ISO A.8.15", "SOC-2 CC7.2"),
@@ -56,9 +61,16 @@ def generate() -> str:
             for e in entries[-20:]:  # last 20 per category
                 ts = e.get("timestamp", "")[:19].replace("T", " ")
                 dev = e.get("device_id", "unknown")
-                det = e.get("details", "")
-                sb = e.get("score_before", "—")
-                sa = e.get("score_after", "—")
+                
+                # Extract from JSON event_body
+                try:
+                    body = json.loads(e.get("event_body", "{}"))
+                except:
+                    body = {}
+                
+                det = body.get("details", "")
+                sb = body.get("score_before", "—")
+                sa = body.get("score_after", "—")
                 lines.append(f"   [{ts}] {dev:12s}  {det}  ({sb}→{sa})")
         lines.append("")
 

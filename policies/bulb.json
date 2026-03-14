@@ -1,7 +1,5 @@
 {
-  "allowed_ports": [443, 80],
-  "allow_new_ips": false,
+  "allowed_ports": [8883, 53],
   "max_dns_entropy": 2.5,
-  "max_bytes_per_window": 200000,
-  "_note": "Bulb policy — very low bandwidth device"
+  "allow_new_ips": false
 }

@@ -1,0 +1,5 @@
+{
+  "AA:BB:CC:00:00:01": { "id": "cam-01", "type": "camera" },
+  "AA:BB:CC:00:00:02": { "id": "bulb-01", "type": "bulb" },
+  "AA:BB:CC:00:00:03": { "id": "sensor-01", "type": "sensor" }
+}

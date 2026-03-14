@@ -1,60 +1,106 @@
+<<<<<<< HEAD
 # ThrustGuard — Project Context
 
 > **Feed this file to any AI model before asking it to write code.**
 > Start every session by sharing this file alongside `archi.md` and `control-flow-1.md`.
+=======
+# ThrushGuard — Project Context
+> Feed this file to any AI model before asking it to write code.
+> This is the single source of truth for architecture, data contracts, and design decisions.
+>>>>>>> 13acf6c62a4a45f4f91bafdb0ebe230af27b82af
 
 ---
 
 ## What We're Building
 
-**ThrustGuard** — A self-hosted IoT trust scoring and behavioral drift analytics engine.
-Runs entirely locally. No cloud. No browser. One terminal.
+**ThrushGuard** — A local IoT behavioral trust scoring and anomaly detection engine.
+No cloud. No browser. One terminal. Runs entirely on-device.
 
 **One-line pitch:**
-> "Silent behavioral drift is how attackers stay hidden for weeks. ThrustGuard catches it in 60 seconds — no cloud, no config, no alert fatigue."
+> "Silent behavioral drift is how attackers stay hidden for weeks. ThrushGuard catches it in 60 seconds — no cloud, no config, no alert fatigue."
 
 **Team:** Exploit X — Harshit JK, Barath VS, Hemanth Gupta P, Sri Raghav R
 **Event:** Eclipse Hackathon (GDG JSSATEB)
-**Theme:** IoT Trust & Drift Analytics
-**Constraint:** 24-hour hackathon, starting from zero.
-
-> **Note on naming:** The codebase uses `ThrustGuard` (project name) and `Eclipse` (internal engine codename) interchangeably in logs and module docstrings. Both refer to the same system.
+**Constraint:** 24-hour solo hackathon
 
 ---
 
-## Hardware (Demo Machine)
+## Hardware
 
 ```
+OS:   Kali Linux (Arch on dev machine)
 RAM:  24GB
-GPU:  RTX 4050 — 6GB VRAM
-OS:   Kali Linux
+GPU:  RTX 4050 6GB VRAM
+LLM:  phi3:mini via Ollama (fully local, no API key)
 ```
 
 ---
 
-## The Problem
+## The Full Data Flow
 
-IoT devices (cameras, bulbs, sensors) are notoriously hard to secure:
-- They can't run endpoint agents
-- Firmware rarely gets updated — old devices stay vulnerable forever
-- One compromised device can pivot to breach the entire network
-- SOC teams drown in alerts — 500/day, 490 false positives, real threats get missed
-
-**The specific gap nobody solves well:**
-Silent behavioral drift — a device gets compromised and slowly changes its communication
-patterns. No single threshold fires. By the time anyone notices, the attacker has been
-inside for weeks.
-
-**Existing tools (Cisco, Defender for IoT, Darktrace):**
-- Enterprise-only, six-figure contracts
-- Cloud-dependent — data leaves your network
-- Black box — no explainability
-- Still require humans staring at dashboards
+```
+┌─────────────────────────────────────────────────────────────┐
+│  DATA INGESTION                                             │
+│                                                             │
+│  simulate_attack.py                                         │
+│    └─ injects fake traffic into dummy NIC "eclipse"         │
+│         (sudo ip link add eclipse type dummy)               │
+│                          │                                  │
+│  data/scapy-collector.py ◄─── captures packets on NIC      │
+│    └─ filters per-device features                           │
+│    └─ writes one JSON line per 60s window → data.jsonl      │
+│                                                             │
+│  data/synthetic.py  (demo fallback — no NIC needed)         │
+│    └─ generates device_window dicts                         │
+│    └─ calls enrich_window() directly                        │
+└───────────────────────┬─────────────────────────────────────┘
+                        │  device_window dict
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│  ENGINE PIPELINE  (entry: enrich_window(window))            │
+│                                                             │
+│  engine/features.py                                         │
+│    ├─ Burn-in check  (10 windows, 8/10 must be clean)       │
+│    ├─ Compute derived features (z_score, ewma, spike_delta) │
+│    ├─ engine/policy.py   → rule violations                  │
+│    ├─ engine/drift.py    → Z-Score, EWMA, entropy           │
+│    ├─ engine/ml.py       → IsolationForest                  │
+│    └─ engine/trust.py    → aggregate → 0-100 score          │
+│                                                             │
+│  Output: trust_result dict                                  │
+│    → written to SQLite   (history, MCP/API queries)         │
+│    → appended to results.jsonl  (TUI reads this)            │
+│    → appended to audit.log      (hash-chained event log)    │
+└───────────────────────┬─────────────────────────────────────┘
+                        │  trust_result
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│  OUTPUT LAYER                                               │
+│                                                             │
+│  TUI/dashboard.py        primary interface, btop-style      │
+│    reads results.jsonl + SQLite                             │
+│    [1-9] select device                                      │
+│    [r]   AI incident report via phi3:mini (Ollama)          │
+│    [i]   instant inspect (score history + violations)       │
+│                                                             │
+│  mcp_server.py           MCP tools (Claude Desktop / Inspector)
+│    get_device_scores()                                      │
+│    get_device_detail(device_id)                             │
+│    get_incident_report(device_id)                           │
+│    verify_audit_chain()                                     │
+│                                                             │
+│  api/main.py             FastAPI background (port 8000)     │
+│    GET /health                                              │
+│    GET /scores                                              │
+│    GET /scores/{device_id}                                  │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## Our Solution — Three Layers
+## Startup Sequence
 
+<<<<<<< HEAD
 **1. Policy Engine (rule-based, fires alongside drift)**
 Hard rules per device class — allowed ports, max DNS entropy, new IP flag.
 Policies are JSON files in `policies/` — editable by admin. Loaded + cached in memory.
@@ -171,15 +217,30 @@ ThrustGuard/
 ```
 
 Run modes:
+=======
+>>>>>>> 13acf6c62a4a45f4f91bafdb0ebe230af27b82af
 ```bash
-python main.py                          # Normal (60s windows)
-ECLIPSE_FAST_MODE=1 python main.py      # Fast demo (5s windows)
+python train_models.py     # ONCE — bakes IsolationForest models
+python verify_ml.py        # before every demo — sanity check
+python seed_baseline.py    # before every demo — skips 10-min burn-in
+python main.py             # boots everything
+```
+
+```
+main.py steps:
+  [1/6] Load IsolationForest models (models/*.pkl)
+  [2/6] Init SQLite WAL (eclipse.db)
+  [3/6] Init audit log (compliance/audit.py)
+  [4/6] Start synthetic generator (5 device threads)
+  [5/6] Start FastAPI + MCP server (background threads, ports 8000/8001)
+  [6/6] Launch TUI (takes over main thread, blocks until q)
 ```
 
 ---
 
-## Call Flow (per device window)
+## Shared Data Contract
 
+<<<<<<< HEAD
 ```
 data/synthetic.py  OR  data/simulate_attack.py
     ↓
@@ -214,12 +275,22 @@ api/main.py (GET /scores, GET /compliance/report)
 device_window_raw = {
     "device_id":       "cam-01",    # string
     "device_type":     "camera",    # camera | bulb | sensor
+=======
+**ALL modules use these exact shapes. Never deviate.**
+
+```python
+# Input to all engines
+device_window = {
+    "device_id":       "cam-01",    # str
+    "device_type":     "camera",    # camera|bulb|sensor|thermostat|router|lock
+>>>>>>> 13acf6c62a4a45f4f91bafdb0ebe230af27b82af
     "timestamp":       1234567890,  # unix int
-    "bytes":           1048576,     # total bytes in 60s window
+    "bytes":           1_000_000,
     "packets":         120,
     "unique_dest_ips": 2,
     "dns_entropy":     2.1,         # Shannon entropy of DNS query strings
     "ports_used":      [443],
+<<<<<<< HEAD
     "new_ip_flag":     False,       # bool — contacted IP not in baseline?
 }
 
@@ -232,18 +303,28 @@ device_window_enriched = {
 }
 
 # Output from trust.py → SQLite → TUI / API
-trust_result = {
-    "device_id": "cam-01",
-    "score":     87,                # int 0-100
-    "status":    "TRUSTED",        # TRUSTED | MONITOR | SUSPICIOUS | HIGH RISK
-    "reasons":   [
-        "Traffic spike Z=4.12 > 3.0",
-        "DNS entropy 4.2 > 3.5 (tunneling suspected)",
-        "ML anomaly [severe] IF score -0.431 < -0.1"
-    ],
-    "timestamp": 1234567890
+=======
+    "new_ip_flag":     False,
+    # derived by features.py — DO NOT set manually:
+    "ewma_delta":      0.01,
+    "z_score":         0.8,
+    "spike_delta":     0.0,
 }
 
+# Output from trust.py → SQLite + results.jsonl
+>>>>>>> 13acf6c62a4a45f4f91bafdb0ebe230af27b82af
+trust_result = {
+    "device_id":  "cam-01",
+    "score":      87,              # int 0-100
+    "status":     "TRUSTED",       # TRUSTED|MONITOR|SUSPICIOUS|HIGH RISK
+    "reasons":    [                # list[str]
+        "Port 22 unauthorized → -40pts",
+        "DNS entropy 4.2 > 3.5 → -15pts",
+    ],
+    "timestamp":  1234567890,      # unix int
+}
+
+<<<<<<< HEAD
 # Deduction dict format — shared by policy.py, drift.py, ml.py
 deduction = {
     "reason":    "Port 22 unauthorized (allowed: [443, 80])",
@@ -261,14 +342,45 @@ audit_entry = {
     "score_after":  52,
     "prev_hash":    "sha256:aabbcc...",
     "hash":         "sha256:ddeeff..."
+=======
+# Audit log entry
+audit_entry = {
+    "timestamp":    "2026-03-14T00:00:00Z",
+    "event_type":   "trust_violation",
+    "device_id":    "cam-02",
+    "details":      "Port 22 unauthorized",
+    "score_before": 92,
+    "score_after":  52,
+    "prev_hash":    "sha256:aabbcc...",
+    "hash":         "sha256:ddeeff...",
+>>>>>>> 13acf6c62a4a45f4f91bafdb0ebe230af27b82af
 }
 ```
+
+---
+
+## File Outputs
+
+```
+eclipse.db        SQLite WAL — score history, queried by MCP/API
+results.jsonl     one trust_result per line — TUI reads this
+audit.log         append-only hash-chained event log
+data.jsonl        raw device windows from scapy (production path)
+reports/          AI-generated .md incident reports
+models/           pre-trained IsolationForest pickles (not in git)
+```
+
+**Why SQLite AND jsonl:**
+- SQLite → history queries, MCP/API random access
+- results.jsonl → TUI tails it like a log, human-readable, `cat`-able
+- audit.log → survives DB corruption, tamper-evident
 
 ---
 
 ## Trust Score Model
 
 ```
+<<<<<<< HEAD
 Score starts at: 100 (carries forward between windows — in-memory + SQLite)
 ────────────────────────────────────────────────────────────────────────────
 Policy — port violation (per bad port)    → -40 pts  ✅ WIRED
@@ -282,6 +394,18 @@ Drift  — DNS entropy (H > 3.5)           → -15 pts  ✅ WIRED
 ML     — IF anomaly (< -0.1)             →  -8 pts  ✅ WIRED
 ────────────────────────────────────────────────────────────────────────────
 Clean window recovery                    →  +2 pts
+=======
+Score starts: 100 (carries forward)
+──────────────────────────────────────────────
+Policy  port violation          -40 pts
+Policy  new destination IP      -10 pts
+Drift   traffic spike Z > 3.0   -20 pts
+Drift   DNS entropy H > 3.5     -15 pts
+Drift   EWMA drift Δ > 0.3       -5 pts
+ML      IsolationForest < -0.1   -8 pts
+──────────────────────────────────────────────
+Clean window recovery            +2 pts
+>>>>>>> 13acf6c62a4a45f4f91bafdb0ebe230af27b82af
 Clamped: max(0, min(100, score))
 
 Note: DNS entropy is checked TWICE (drift.py uses global threshold 3.5;
@@ -289,16 +413,17 @@ Note: DNS entropy is checked TWICE (drift.py uses global threshold 3.5;
       independently on the same window, each deducting their own points.
 
 Tiers:
-  80-100 → TRUSTED      [√]
-  60-79  → MONITOR      [!]
-  40-59  → SUSPICIOUS   [?]
-  < 40   → HIGH RISK    [X]
+  80-100  TRUSTED      green
+  60-79   MONITOR      yellow
+  40-59   SUSPICIOUS   dark_orange
+  0-39    HIGH RISK    red   ← TUI row flashes dark_red
 ```
 
 ---
 
-## Burn-in & Anti-Poisoning
+## Burn-in
 
+<<<<<<< HEAD
 **Burn-in (CALIBRATING → ACTIVE):**
 - Requires `BURN_IN_WINDOWS = 10` windows minimum
 - Gate: at least `BURN_IN_CLEAN_THRESHOLD = 8` of those must be "clean":
@@ -320,6 +445,62 @@ Tiers:
 - If `≥ CONSECUTIVE_ANOMALY_FREEZE = 3` consecutive anomaly windows: EWMA baseline is frozen
 - While frozen: drift is measured against the last-known-clean EWMA value
 - Baseline unfreezes on first clean window
+=======
+```
+New device detected → STATE_CALIBRATING
+  Engine buffers 10 windows
+  8/10 must be clean
+  On pass → STATE_ACTIVE, scoring begins
+  TUI shows: score=--- status=⏳ CALIB...
+
+seed_baseline.py pre-injects 10 clean windows → all devices boot ACTIVE
+```
+
+---
+
+## Engine Modules
+
+```
+engine/features.py     entry point  enrich_window(window)
+                       burn-in, derived features, orchestration
+                       anti-poisoning: freeze EWMA after 3 consecutive anomalies
+
+engine/policy.py       rule checks — loads policies/<device_type>.json
+                       unknown type → policies/default.json (fallback)
+                       sanitizes device_type (path traversal safe)
+                       bad JSON → fallback, never crashes
+
+engine/drift.py        Z-Score, EWMA delta, Shannon entropy signals
+
+engine/ml.py           IsolationForest — pre-trained, never retrained live
+                       feature vector (8 fixed):
+                         [bytes, packets, dns_entropy, unique_dest_ips,
+                          z_score, ewma_delta, new_ip_flag, spike_delta]
+                       threshold: -0.1
+
+engine/trust.py        aggregates all deductions → score
+                       writes SQLite + appends results.jsonl
+                       public: get_latest_scores(), get_score_history(device_id)
+
+engine/policy_generator.py   stub (deferred feature)
+```
+
+---
+
+## Policy Files
+
+```
+policies/default.json    paranoid fallback
+policies/camera.json     ports [443,80,554], entropy max 3.5
+policies/bulb.json       ports [443,80], entropy max 2.5
+policies/sensor.json     ports [443,1883], entropy max 2.0
+policies/thermostat.json
+policies/router.json     allow_new_ips: true, entropy max 4.0
+policies/lock.json       ultra paranoid, 50KB max
+```
+
+Add new device type: drop `<type>.json` in `policies/`. Zero code changes.
+>>>>>>> 13acf6c62a4a45f4f91bafdb0ebe230af27b82af
 
 **EWMA mechanics:**
 - `EWMA_ALPHA = 0.3` (30% current window, 70% history)
@@ -330,6 +511,7 @@ Tiers:
 
 ## IsolationForest Strategy
 
+<<<<<<< HEAD
 - Pre-trained on 500 synthetic normal windows per device class (`train_models.py`)
 - `contamination=0.05`, `n_estimators=100`, `random_state=42`, `n_jobs=-1`
 - Pickled to `models/{class}_baseline.pkl` — **never retrained live**
@@ -498,29 +680,115 @@ python data/simulate_attack.py --device cam-02 --attack botnet
 python data/simulate_attack.py --device sensor-01 --attack exfil
 python data/simulate_attack.py --device cam-02 --attack dns_tunnel --dry-run
 python data/simulate_attack.py --device cam-02 --attack dns_tunnel --interval 10
+=======
+>>>>>>> 13acf6c62a4a45f4f91bafdb0ebe230af27b82af
+```
+Training: python train_models.py
+Verify:   python verify_ml.py  (run before every demo)
+
+<<<<<<< HEAD
+=======
+contamination=0.05, n_estimators=100, random_state=42
+500 normal windows per class, tight Normal distributions
+
+Normal window IF score: > -0.1  → clean
+Attack window IF score: < -0.1  → anomaly → -8pts
+
+Models: models/cam_baseline.pkl
+        models/bulb_baseline.pkl
+        models/sensor_baseline.pkl
 ```
 
+>>>>>>> 13acf6c62a4a45f4f91bafdb0ebe230af27b82af
 ---
 
 ## Demo Attack Sequence
 
 ```bash
 # Terminal 1
+<<<<<<< HEAD
 ECLIPSE_FAST_MODE=1 python main.py
 
 # Terminal 2 (devices become ACTIVE in ~50s with fast mode)
 python data/simulate_attack.py --device cam-02 --attack dns_tunnel
+=======
+python seed_baseline.py && python main.py
+
+# Terminal 2 — after TUI shows all devices TRUSTED
+ECLIPSE_FAST_MODE=1 python data/simulate_attack.py --device cam-02 --attack dns_tunnel
+>>>>>>> 13acf6c62a4a45f4f91bafdb0ebe230af27b82af
 ```
 
-Expected progression on cam-02:
 ```
+<<<<<<< HEAD
 T=0:00  cam-02 seeded at 92  TRUSTED     (green)
 T=0:20  window 1 →   ~87    TRUSTED     (EWMA drift -5 only; ML does NOT fire this window)
 T=0:40  window 2 →   ~54    SUSPICIOUS  (Z-Score -20, DNS entropy -15+15, ML -8)
 T=1:00  window 3 →   ~11    HIGH RISK   (Port 22 -40, new IP -10, Z -20, DNS -30, EWMA -5, ML -8)
+=======
+T=0:00  cam-02  92  TRUSTED    (baseline)
+T=0:20  window1 87  TRUSTED    (EWMA -5)
+T=0:40  window2 52  SUSPICIOUS (Z -20, DNS -15, ML -8)
+T=1:00  window3 28  HIGH RISK  (port22 -40, DNS -15, newIP -10, Z -20, EWMA -5, ML -8)
+
+TUI: cam-02 row flashes red
+[2] select cam-02
+[r] phi3:mini generates incident report (~8s)
+[i] instant score history inspect
+>>>>>>> 13acf6c62a4a45f4f91bafdb0ebe230af27b82af
 ```
 
-TUI flashes the HIGH RISK row red. Score bar drains live. Reasons listed in violation feed.
+---
+
+## MCP Demo (Arch Linux)
+
+```bash
+# While main.py is running:
+npx @modelcontextprotocol/inspector python mcp_server.py
+# opens http://localhost:5173
+# judges click tools live — get_device_scores(), get_incident_report("cam-02")
+```
+
+---
+
+## Project Structure
+
+```
+ThrushGuard/
+├── engine/
+│   ├── features.py           ✅
+│   ├── policy.py             ✅
+│   ├── drift.py              ✅
+│   ├── ml.py                 ✅
+│   ├── trust.py              ✅
+│   └── policy_generator.py   ✅ stub
+├── data/
+│   ├── synthetic.py          ✅
+│   └── scapy-collector.py    (real NIC capture)
+├── TUI/
+│   └── dashboard.py          ✅ [r] report, [i] inspect
+├── intent/
+│   └── narrator.py           ✅ phi3:mini reports
+├── compliance/
+│   └── audit.py              ✅ hash chain
+├── policies/
+│   └── *.json                ✅ 7 device types
+├── models/
+│   └── *.pkl                 ✅ pre-trained
+├── tests/
+│   └── test_api.py           ✅ 35 tests
+├── main.py                   ✅
+├── mcp_server.py             ✅
+├── seed_baseline.py          ✅
+├── train_models.py           ✅
+├── verify_ml.py              ✅
+├── simulate_attack.py        ✅
+├── requirements.txt          ✅
+└── .gitignore                ✅
+
+NOT BUILT:
+  api/main.py                 ← /health /scores /scores/{id}
+```
 
 ---
 
@@ -528,6 +796,7 @@ TUI flashes the HIGH RISK row red. Score bar drains live. Reasons listed in viol
 
 ```
 Python 3.11+
+<<<<<<< HEAD
 ├── scikit-learn ≥ 1.3.0  → IsolationForest
 ├── numpy        ≥ 1.24.0 → Z-Score, EWMA, Shannon Entropy
 ├── pandas       ≥ 2.0.0  → data manipulation (train_models.py)
@@ -537,10 +806,22 @@ Python 3.11+
 ├── httpx        ≥ 0.25.0 → Ollama warmup ping
 ├── pytest       ≥ 8.0.0  → test runner
 └── scapy                 → real packet capture (production, not used in demo)
+=======
+rich          TUI (PRIMARY INTERFACE)
+scikit-learn  IsolationForest
+numpy         Z-Score, EWMA, Shannon entropy
+fastapi       background REST API
+sqlite3       WAL mode score history
+mcp           FastMCP server
+httpx         Ollama calls (async)
+ollama        phi3:mini local LLM
+scapy         live packet capture (production)
+>>>>>>> 13acf6c62a4a45f4f91bafdb0ebe230af27b82af
 ```
 
 ---
 
+<<<<<<< HEAD
 ## Environment Variables
 
 | Variable | Default | Purpose |
@@ -577,3 +858,16 @@ Python 3.11+
 | Multi-node deployment | ❌ Deferred |
 | `policy.py` using per-device ID for lookup | ⚠ Policy loaded by `device_type`, not `device_id` — auto-generated per-device JSONs exist but aren't automatically consulted unless device_type matches device_id |
 | TUI input commands (attack/inspect) | ⚠ Display only — not wired to a real command interpreter |
+=======
+## Risk Mitigations
+
+| Risk | Mitigation |
+|------|-----------|
+| Burn-in delay | seed_baseline.py |
+| Ollama down | generate_report_fallback() always works |
+| Models missing | verify_ml.py exits 1 before demo |
+| SQLite lock | WAL mode + timeout=10 |
+| TUI crash | headless fallback in main.py |
+| Terminal narrow | hide DRIFT <100 cols, TYPE <80 cols |
+| Attack too fast | time.sleep(20) between windows |
+>>>>>>> 13acf6c62a4a45f4f91bafdb0ebe230af27b82af
