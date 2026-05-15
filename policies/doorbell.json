@@ -1,0 +1,5 @@
+{
+  "allowed_ports": [443, 80, 5353],
+  "max_dns_entropy": 3.5,
+  "allow_new_ips": false
+}
